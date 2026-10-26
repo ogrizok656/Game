@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Dive Sub Prototype</title>
+<title>Atlantis Sub</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #04101f; }
   canvas { display: block; cursor: crosshair; }
@@ -11,76 +11,131 @@
 <body>
 <canvas id="c"></canvas>
 <script>
+// =====================================================================
+//  ATLANTIS SUB - demo skeleton. See DESIGN.md for the full idea.
+//  Visuals are deliberately rough; this file is about how it plays.
+// =====================================================================
+
 // ===================== TUNING =====================
-const THRUST        = 900;   // px/s^2 acceleration from WASD/arrows
+// Movement
+const THRUST        = 900;   // px/s^2 at full throttle with an empty storage
 const DRAG          = 2.2;   // per second; higher = stops sooner (top speed ~ THRUST/DRAG)
-const SINK_ENABLED  = false; // constant downward drift on/off
-const SINK_SPEED    = 35;    // px/s the sub drifts down to when you let go
+const SPOOL_TIME    = 0.35;  // seconds for the throttle to spool up/down (longer with spare parts aboard)
 const TILT_PER_SPEED= 0.0012;// radians of tilt per px/s of horizontal speed
 const ROT_STIFFNESS = 40;    // how hard the sub rotates back toward its target tilt
 const ROT_DAMPING   = 3.5;   // low = wobbly, high = stiff
 const BOUNCE        = 0.45;  // fraction of impact speed kept after hitting rock
-const HIT_SPEED     = 170;   // px/s into the wall needed to take damage
+const HIT_SPEED     = 170;   // px/s into the wall needed for an impact to count
+const BASE_SINK     = 10;    // px/s the sub settles down at with nothing aboard
+// Hull + parts
+const MAX_HP        = 200;   // the carcass. 0 = implosion
 const HIT_DAMAGE    = 20;
-const MAX_HP        = 200;   // carcass (main body). 0 = implosion
-const IMMUNITY_TIME = 1.0;   // seconds of invulnerability after a hit
-const DOT_FADE_TIME = 6.0;   // seconds before a sonar dot disappears
-const MURK_RADIUS   = 380;   // px, hard cutoff: murky water kills the ping here, nothing past it echoes
-const SOUND_SPEED   = 650;   // px/s the ping and its echo travel; lower = longer wait for dots
-const PING_COOLDOWN = 0.7;   // seconds between pings while holding the mouse
-const PING_SPREAD   = 0.9;   // radians, width of the ping cone (Math.PI * 2 = all around)
-const PING_RAYS     = 70;    // resolution of each ping (= max dots per ping)
-// Old, crappy sonar hardware (all effects scale with distance: 0 at the sub, full at MURK_RADIUS)
-const SONAR_JITTER   = 0.07; // dot position error as a fraction of distance (0.07 = ~27px off at the murk edge)
-const SONAR_DROPOUT  = 0.55; // chance a hit at the murk edge never comes back
-const SONAR_DIST_FADE= 0.75; // how much dimmer far dots are (0 = no falloff, 1 = invisible at the edge)
-const SONAR_GRID     = 6;    // px, dots snap to this coarse grid like a low-res display
-const SONAR_NOISE    = 3;    // fake returns (static) per ping
-const SONAR_FLICKER  = 0.3;  // chance each wave segment is missing on a given frame
-const SONAR_COLOR    = '#5f9'; // phosphor green
-const START_X = 600, START_Y = 100;
+const HULL_IMMUNITY = 1.0;   // seconds between hull hits
+const PART_BREAK_CHANCE    = 1 / 3;
+const STORAGE_BREAK_CHANCE = 1 / 2;
+const PART_IMMUNITY = 1.0;   // per part, after it rolls
+const PROP_BUMPS    = 3;     // creature bumps before the propeller dies
+const PROP_BUMP_CHANCE = 0.75; // a creature touch doesn't always land on the propeller
+// Engine, power, air
+const PREVENTION_CHANCE  = 0.25; // rock hit that did hull damage -> engine safety shutdown
+const REPORT_LEAD        = 0.5;  // terminal reports this long BEFORE the engine actually stops
+const RESTART_PREVENTION = 2.0;  // hold E with your hand on the engine
+const RESTART_MALFUNCTION= 5.0;
+const TERMINAL_BACKUP    = 7.0;  // terminal stays readable this long after power drops
+const RED_LIGHT_TIME     = 30;   // emergency light, then pitch dark
+const SUFFOCATE_TIME     = 60;   // seconds of air without a working air generator
+const AIR_REFILL         = 0.05; // fraction per second while the air generator runs
+const CRANK_EFFECT       = 0.6;  // hand crank cuts air loss by this much while it's turning
+const CRANK_WINDOW       = 0.4;  // seconds the crank counts as turning after you last moved it
+const BOOT_TIME          = 3.0;  // after turning the breaker back on, nothing works for this long
+const BREAKER_HOLD       = 0.5;
+// Fuel (fraction of the tank per second)
+const FUEL_IDLE   = 0.0012;  // engine running
+const FUEL_LIGHTS = 0.0003;
+const FUEL_SONAR  = 0.0004;  // sonar switched on
+const FUEL_PING   = 0.0015;  // per ping
+const FUEL_PUMP   = 0.0006;
+const FUEL_THRUST = 0.0012;  // at full throttle
+// Water
+const BUCKET        = 0.05;  // water trapped by one hatch cycle (module in or out of a slot)
+const PUMP_RATE     = 0.005; // per second = one bucket per 10 s
+const ASCEND_LOCK   = 0.3;   // above this much water you can't climb
+const BAY_FLOOD     = 0.2;   // opening the bay on a malfunctioned engine dumps this much in
+const SHAFT_LEAK    = 0.02;  // per second through the shaft while the bay is open with a dead propeller
+const DRY_SPARK_TIME= 1.5;   // pump running dry sparks this long, then explodes
+const PUMP_BLAST_AIR= 0.25;  // air lost when the pump explodes
+// Repairs + spare parts
+const REPAIR_TIME      = 4.0;  // mid-dive, costs 1 spare part
+const DOCK_REPAIR_TIME = 1.5;  // free while docked
+const MAX_PARTS        = 6;
+const PART_SINK        = 6;    // px/s extra sink per spare part
+const PART_MASS        = 0.12; // extra inertia per spare part
+const SCRAP_SIZE       = 10;
+const SCRAP_GRAB_TIME  = 0.6;
+const SCRAP_PER_DIVE   = 6;
+// Dives + quota
+const DOCK_TIME        = 60;   // free repair minute at the start of each dive
+const DIVES_PER_QUOTA  = 3;
+const QUOTA_START      = 600;
+const QUOTA_GROWTH     = 1.35;
+const HULL_FREE_FRACTION = 0.51; // free hull repair between dives only goes up to this
+const HULL_HIT_COST    = 100;  // coins for +1 hit (HIT_DAMAGE hp) of hull at the dock
+const DIVE_RETURN_Y    = 160;  // come back above this to end a dive
+const DIVE_MIN_DEPTH   = 500;  // ...after having been at least this deep
+// Sonar
+const DOT_FADE_TIME = 6.0;
+const MURK_RADIUS   = 380;   // px, hard cutoff: murky water kills the ping here
+const SOUND_SPEED   = 650;
+const PING_COOLDOWN = 0.7;
+const PING_SPREAD   = 0.9;   // radians, width of the ping cone
+const PING_RAYS     = 70;
+const SONAR_PORT_ARC= 1.3;   // radians each side of the slot's facing the cone can be aimed
+const SONAR_JITTER   = 0.07;
+const SONAR_DROPOUT  = 0.55;
+const SONAR_DIST_FADE= 0.75;
+const SONAR_GRID     = 6;
+const SONAR_NOISE    = 3;
+const SONAR_FLICKER  = 0.3;
+const SONAR_COLOR    = '#5f9';
 // Creature
-const CREATURE_X        = 600;  // center, in the open pocket ~60% down the cave
-const CREATURE_Y        = 2520;
-const CREATURE_SIZE     = 70;   // blob diameter (collision + sonar use a circle)
-const CREATURE_DAMAGE   = 30;   // per touch, no speed threshold
-const CREATURE_KNOCKBACK= 500;  // px/s the sub gets flung away on contact
-const CREATURE_DOT_FADE = 9.0;  // creature dots linger longer than rock dots
-// Loot + arm
-const RELIC_SIZE     = 16;     // px, square
-const RELIC_VALUE    = 125;    // coins per relic sent up
-const RELIC_COLOR    = '#fd3'; // sonar dot color for relics
-const ARM_REACH      = 90;     // px from the arm's sliding base to the claw at full stretch
-const ARM_SLIDE_SPEED= 120;    // px/s the arm base slides along its rail
-const CLAW_RADIUS    = 6;      // grab tolerance around the claw tip
-const TIE_TIME       = 1.5;    // seconds to tie a balloon on; stay within ARM_REACH or it cancels
-const BALLOON_SPEED  = 400;    // px/s a ballooned relic rises
-const ARM_MAX_HITS   = 2;      // hits taken while tying before the arm breaks
-// Engine, power, terminal
-const ENGINE_STALL_CHANCE  = 0.4;  // chance any hit stalls the engine (= power cut)
-const ENGINE_RESTART_TIME  = 3.0;  // seconds the restart takes after pressing E at the engine
-const TERMINAL_BACKUP_TIME = 7.0;  // the terminal runs on backup this long after a power cut, then dies
-const ALARM_LIGHT_TIME     = 30;   // seconds the red alarm lights blink after a power cut
-const ALARM_INTERVAL       = 1.5;  // seconds between alarm beeps while the lights blink
-const PROP_SPIN            = 18;   // rad/s propeller spin while powered
-const SHAKE_TIME           = 0.35; // seconds of screen shake per hit
-const SHAKE_AMOUNT         = 14;   // screen px of shake at the start of a hit
-// Modules
-const MODULE_HP      = 3;      // hits a module survives; each impact damages the nearest module
-// Crew / interior
-const VIEW_ZOOM      = 2.6;    // camera scale on the sub (shrinks to fit small windows)
-const SUB_VIS_TILT   = 0.5;    // how much of the physics wobble is drawn (keeps the interior readable)
-const STAND_UP_TIME  = 0.5;    // seconds to get out of the chair
-const WALK_SPEED     = 40;     // interior px/s
-const CLIMB_SPEED    = 35;     // interior px/s on the ladder
-const USE_RANGE      = 8;      // how close (interior px) the figure must be to use something
-const STUMBLE_TIME   = 0.5;    // seconds of lost control after a hit while standing
-const STUMBLE_SPEED  = 50;     // interior px/s the figure gets thrown
-const HATCH_TURNS    = 2;      // full wheel turns to go from sealed to open
-const HATCH_PASSABLE = 0.95;   // how open the hatch must be to walk through
+const CREATURE_X = 600, CREATURE_Y = 2520;
+const CREATURE_SIZE     = 70;
+const CREATURE_DAMAGE   = 30;
+const CREATURE_KNOCKBACK= 500;
+const CREATURE_DOT_FADE = 9.0;
+// Loot + robot arm
+const RELIC_SIZE     = 16;
+const RELIC_VALUE    = 125;
+const RELIC_COLOR    = '#fd3';
+const RELICS_PER_DIVE= 8;      // two of them always next to the creature
+const ARM_REACH      = 90;
+const ARM_SLIDE_SPEED= 140;    // px/s the arm base runs along its rail
+const CLAW_RADIUS    = 6;
+const TIE_TIME       = 1.5;
+const BALLOON_SPEED  = 400;
+const ARM_MAX_HITS   = 2;
+// Shake
+const SHAKE_TIME     = 0.35;
+const SHAKE_WALL     = 6;
+const SHAKE_CREATURE = 22;
+// Crew: the stick figure and his hand (interior px)
+const FIG_HEIGHT     = 50;     // feet to top of the head
+const HAND_REACH     = 38;     // shoulder to hand
+const HAND_BEHIND    = 4;      // how far behind his own shoulder he can reach (he has to turn around)
+const TURN_TIME      = 0.2;    // seconds to turn around
+const WALK_SPEED     = 30;
+const WALK_ACCEL     = 220;    // so he doesn't start/stop like a robot
+const STUMBLE_TIME   = 0.5;
+const STUMBLE_SPEED  = 50;
+const HATCH_TURNS    = 1.5;    // wheel turns from sealed to open
+// Camera
+const ZOOM_STANDING  = 3;      // shrinks to fit small windows
+const ZOOM_TIME      = 0.6;
+const DIM_STANDING   = 0.3;
+const SUB_VIS_TILT   = 0.5;    // fraction of the physics wobble that's drawn
+const STAND_UP_TIME  = 0.5;
 
 // ===================== WORLD =====================
-// Rock rectangles [x, y, w, h]. The open cave is roughly x 0..1200, y -50..4200.
 const ROCKS = [
   [-300, -300, 300, 4800], [1200, -300, 300, 4800],  // outer walls
   [-300, -300, 1800, 250], [-300, 4200, 1800, 300],  // ceiling, floor
@@ -92,92 +147,134 @@ const ROCKS = [
   [1000, 3000, 200, 500], [400, 3200, 250, 80],       // right wall, thin floating slab
   [0, 3500, 200, 700], [900, 3800, 300, 120],         // bottom left wall, last overhang
 ].map(([x, y, w, h]) => ({ x, y, w, h }));
-
-// Relic centers [x, y], middle of the cave to the floor. The first two flank the creature (at 600, 2520).
-const RELIC_SPOTS = [
-  [490, 2545], [690, 2480],   // greed bait, right next to the creature
-  [780, 2150], [250, 2200],   // middle, open water
-  [900, 2750], [350, 3150],   // right pocket, beside the thin slab
-  [700, 3700], [500, 4185],   // lower cave, resting on the floor
-];
+const DOCK_X = 600, DOCK_Y = 100;
+const RELIC_BAIT = [[490, 2545], [690, 2480]];
+const RELIC_POOL = [[780, 2150], [250, 2200], [900, 2750], [350, 3150], [700, 3700], [500, 4185],
+                    [600, 1500], [350, 1100], [1100, 2800], [150, 3300], [1050, 3700], [800, 4185]];
+const SCRAP_POOL = [[400, 700], [800, 1000], [300, 1600], [700, 1900], [1100, 2200], [200, 2500],
+                    [650, 3000], [850, 3350], [400, 3850], [1000, 4185]];
 
 // ===================== SUB LAYOUT =====================
-// Sub-local px, origin = sub position. Front (nose) is RIGHT, back is LEFT. About 235x125 total.
-// A long bar on top runs back to the engine bay; the crew room is the big ring on the right; a leg slopes
-// down from under the bar to the crew room floor. The propeller hangs under the engine.
-const HULL_OUTLINE = [[-120, -60], [100, -60], [115, -45], [115, 45], [100, 60], [-10, 60], [-62, -20], [-120, -20]];
-const CREW_ROOM = [[-5, -55], [98, -55], [110, -43], [110, 43], [98, 55], [-5, 55]]; // hollow interior
-const CORRIDOR = [-115, -55, 110, 30];                 // hollow bar interior [x, y, w, h], engine bay at its left end
-// Collision boxes [x, y, w, h]: top bar, crew room, sloped leg (axis-aligned, rotation is visual only)
-const SUB_BOXES = [[-120, -60, 125, 40], [-10, -60, 125, 120], [-50, -20, 40, 60]];
-// Walkable floors and the ladder between them
-const FLOOR_TOP = -25, FLOOR_BOT = 52;                 // corridor floor, crew room floor (y of the figure's feet)
-const CORRIDOR_X = [-112, 6], CREW_X = [2, 90];        // walkable x span of each floor
-const LADDER_X = 4;
-const HATCH_X = -74;                                   // engine bay hatch, in the corridor
-const ENGINE_BOX = [-113, -54, 24, 28], ENGINE_USE_X = -82; // purple engine; stand left of USE_X to touch it
-const PROP_POS = [-100, 6];                            // propeller hub, under the engine, outside
-const STORAGE_BOX = [28, -55, 52, 9];                  // orange (nothing yet)
-const PANEL_BOX = [100, -22, 9, 44];                   // green control panel on the front wall
-const PUMP_BOX = [84, 32, 20, 18];                     // blue pump (nothing yet)
-const CHAIR_X = 82;                                    // chair faces the control panel
-// Red module slots. The sonar module sits in one and can be dragged between them.
+// Traced from the sketch. Sub-local px, origin = sub position, front (nose) is RIGHT. About 240x102.
+// Engine room top-left, propeller hanging under it, crew room on the right, diagonal back-bottom wall.
+const HULL_OUTLINE = [[-120, -51], [106, -51], [112, -40], [116, -24], [119, -5], [119, 12], [117, 30], [112, 51],
+                      [-15, 51], [-49, 1], [-120, 1]];
+const CREW_ROOM = [[-35, -36], [102, -36], [110, 0], [107, 41], [6, 41], [-11, 33], [-27, 15], [-37, 3]];
+const ENGINE_ROOM = [-113, -45, 64, 42];          // [x, y, w, h]
+const DOOR = [-43, -25, 6, 28];                   // yellow door slab between engine room and crew room
+const DOOR_GAP = [-49, -25, 14, 28];              // the hole in the wall it closes
+const ENGINE_BOX = [-102, -41, 40, 33];           // touch it to restart
+const BREAKER_POS = [-56, -14];                   // inside the engine bay
+const WHEEL_POS = [-20, -19], WHEEL_R = 12;       // the door's hand wheel, crew room side
+const CRANK_POS = [24, 6], CRANK_R = 6;           // air hand crank on the back wall
+const STORAGE_POLY = [[46, -36], [102, -36], [105, -25], [58, -25]];
+const PANEL_POLY = [[96, -25], [104, -25], [110, 0], [107, 41], [82, 41], [82, 16], [95, 12]];
+const PUMP_BOX = [5, 42, 23, 8];                  // blue, in the floor next to the floor slot
+const PROP_POS = [-85, 40];                       // propeller disc under the engine room
+const CHAIR_X = 62;                               // where you sit
+const SIT_RANGE = [24, 52];                       // stand here to sit down
+const WALK_X = [-24, 80];                         // walkable span (left end climbs the slope)
+const BODY_CENTER = [0, 0];
+// Feet height along the floor: flat on the right, slopes up along the diagonal wall on the left
+function footY(x) {
+  if (x >= 6) return 41;
+  if (x >= -11) return 33 + (x + 11) / 17 * 8;
+  return 15 + (x + 27) / 16 * 18;
+}
+// Red module slots: center, size, rotation, and the direction each faces (sonar can only aim within its arc)
 const SLOTS = [
-  { name: 'TOP',    box: [8, -60, 18, 5] },
-  { name: 'CORNER', box: [102, -57, 10, 6] },
-  { name: 'BOTTOM', box: [30, 55, 40, 5] },
-  { name: 'LEG',    box: [-46, 14, 18, 6] },
+  { name: 'TOP',   c: [-2, -43], w: 34, h: 11, ang: 0,    face: [0, -1] },
+  { name: 'NOSE',  c: [112, 0],  w: 10, h: 35, ang: 0,    face: [1, 0] },
+  { name: 'DIAG',  c: [-24, 28], w: 26, h: 9,  ang: 0.97, face: [-0.83, 0.56] },
+  { name: 'FLOOR', c: [45, 46],  w: 33, h: 8,  ang: 0,    face: [0, 1] },   // the only slot the pump works in
 ];
-const SONAR_START_SLOT = 2;                            // starts in the bottom slot
-const RAIL_Y = 64, RAIL_X = [8, 90];                   // arm rail under the crew room
-const MODULE_NAMES = { engine: 'ENGINE', propeller: 'PROPELLER', panel: 'CONTROL PANEL', sonar: 'SONAR',
-                       arm: 'ARM', storage: 'STORAGE', pump: 'PUMP' };
+const FLOOR_SLOT = 3;
+// Robot arm rail: the green line under the hull (back diagonal, bottom, up the nose)
+const RAIL = [[-53, 7], [-17, 56], [116, 56], [123, 18]];
+const SUB_BOXES = [[-120, -51, 71, 52], [-49, -51, 17, 52], [-32, -51, 152, 102]];
+const MODULE_COLORS = { SONAR: '#1b2b22', PUMP: '#1b2238', HORN: '#2e2a1b', AIR: '#1b2e2e' };
 
 // ===================== STATE =====================
-const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const cv = document.getElementById('c');
+let ctx = cv.getContext('2d');           // swapped to an offscreen canvas when snapshotting frozen screens
 const keys = {}, mouse = { x: 0, y: 0, down: false };
-let sub, cam, dots, pings, echoes, pingTimer, time;
-let relics, arm, coins;
-let engine, term, alarmT, modules, sonarMod, hatch, wheel, drag;
-let mode, standT, fig, shake, propAng;
-let viewScale = 1; // current camera zoom, used by mouseWorld()
+let sub, cam, dots, pings, echoes, pingTimer, time, runTime;
+let relics, scraps, arm, coins, paid, quota, divesDone, quotasMet, phase, dockT, maxDepth;
+let engine, gen, sys, air, fuel, water, pendingWater, spare, parts, modules, hatch, crank, grip, carry, inv, hold;
+let mode, standT, fig, hand, shake, shakeAmp, shakeBias, propAng, zoomT, throttle, frozenThrottle, darkT;
+let failReason, pumpSpark, snapshot, termButtons = [], invButtons = [];
+let viewScale = 1;
+let logLines = [];
 
 function reset() {
-  sub = { x: START_X, y: START_Y, vx: 0, vy: 0, ang: 0, angV: 0, hp: MAX_HP, immune: 0, dead: false };
-  cam = { x: START_X, y: START_Y };
-  dots = []; pings = []; echoes = []; pingTimer = 0; time = 0;
-  // Relic state: 'free' -> 'tying' (arm holding it) -> 'rising' (balloon on) -> 'gone' (banked)
-  relics = RELIC_SPOTS.map(([x, y]) => ({ x, y, state: 'free' }));
-  // Arm: baseX slides on the rail, ox/oy = claw offset from the base (kept so it can freeze or hang limp)
-  arm = { baseX: 50, tipX: START_X, tipY: START_Y, ox: 0, oy: 40, held: null, tie: 0, hits: 0 };
-  coins = 0;
-  engine = { running: true, restart: 0, alarm: 0 }; // restart > 0 = restart in progress (seconds elapsed)
-  term = { backup: 0, log: [] };                    // backup = seconds of terminal left after a power cut
-  alarmT = 0;                                       // seconds of red alarm lights left
-  modules = {};
-  for (const k in MODULE_NAMES) modules[k] = { hp: MODULE_HP };
-  sonarMod = { slot: SONAR_START_SLOT };
-  hatch = { progress: 0 };                          // 0 = sealed, 1 = fully open
-  wheel = { active: false, last: null };            // hatch wheel mini game
-  drag = false;                                     // dragging the sonar module
-  mode = 'seated'; standT = 0;                      // 'seated' | 'standingUp' | 'standing'
-  fig = { x: CHAIR_X, y: FLOOR_BOT, ladder: false, vx: 0, stun: 0, walk: 0 }; // stick figure, interior px
-  shake = 0; propAng = 0;
-  log('SYSTEMS ONLINE', 'good');
+  sub = { x: DOCK_X, y: DOCK_Y, vx: 0, vy: 0, ang: 0, angV: 0, hp: MAX_HP, hullImm: 0, dead: false };
+  cam = { x: DOCK_X, y: DOCK_Y };
+  time = 0; runTime = 0;
+  coins = 0; paid = 0; quota = QUOTA_START; divesDone = 0; quotasMet = 0;
+  fuel = 1; air = 1; water = 0; pendingWater = 0; spare = 0;
+  // Engine: 'running' | 'off'. report = why it's off. stopIn > 0 = report shown, engine still turning.
+  engine = { state: 'running', report: null, stopIn: 0, flooded: false };
+  gen = { on: true, boot: 0 };
+  sys = { sonar: true, pump: false, lights: true };
+  parts = {
+    propeller: { broken: false, bumps: 0, imm: 0 },
+    panel:     { broken: false, imm: 0 },
+    storage:   { broken: false, imm: 0 },
+    pumpMech:  { broken: false, dead: false, imm: 0 }, // dead = exploded, gone for the run
+  };
+  // Modules: slot index, or -1 = in storage (carried = in the figure's hand)
+  modules = [
+    { id: 'AIR',   slot: 0, broken: false, imm: 0, carried: false },
+    { id: 'SONAR', slot: 1, broken: false, imm: 0, carried: false },
+    { id: 'PUMP',  slot: FLOOR_SLOT, broken: false, imm: 0, carried: false },
+    { id: 'HORN',  slot: -1, broken: false, imm: 0, carried: false }, // no effect in the demo
+  ];
+  arm = { u: railLength() * 0.55, tipX: DOCK_X, tipY: DOCK_Y, ox: 0, oy: 40, held: null, tie: 0, hits: 0, broken: false };
+  hatch = { progress: 0 };                 // engine bay door: 0 sealed, 1 open
+  crank = { lastT: -9, ang: 0 };
+  grip = null;                             // wheel/crank the hand is holding: { id, last }
+  carry = null;                            // module in the hand
+  inv = { open: false };                   // storage inventory window
+  hold = { id: null, t: 0, lock: false };
+  mode = 'seated'; standT = 0; zoomT = 0;
+  fig = { x: 30, vx: 0, face: 1, turn: 0, stun: 0, walk: 0 };
+  hand = { x: 50, y: 0 };
+  shake = 0; shakeAmp = 0; shakeBias = 0; propAng = 0; darkT = 0; pumpSpark = 0;
+  throttle = { x: 0, y: 0 }; frozenThrottle = null; snapshot = null;
+  failReason = null;
+  dots = []; pings = []; echoes = []; pingTimer = 0;
+  logLines = [];
+  startDock(true);
 }
 
 // ===================== HELPERS =====================
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const ok = name => modules[name].hp > 0;                     // module not broken
-const power = () => engine.running && ok('engine');
-const terminalAlive = () => ok('panel') && (power() || term.backup > 0);
-const armBroken = () => arm.hits >= ARM_MAX_HITS || !ok('arm');
-const boxCenter = ([x, y, w, h]) => [x + w / 2, y + h / 2];
-const sonarLocal = () => boxCenter(SLOTS[sonarMod.slot].box);
+const dist = (a, [x, y]) => Math.hypot(a.x - x, a.y - y);
+const inRect = (p, [x, y, w, h], pad = 0) => p.x > x - pad && p.x < x + w + pad && p.y > y - pad && p.y < y + h + pad;
+function inPoly(p, pts) {
+  let c = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i], [xj, yj] = pts[j];
+    if ((yi > p.y) !== (yj > p.y) && p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi) c = !c;
+  }
+  return c;
+}
+const power = () => engine.state === 'running' && gen.on && gen.boot <= 0;
+const panelOk = () => !parts.panel.broken;
+const terminalAlive = () => power() || darkT < TERMINAL_BACKUP;
+const mass = () => 1 + spare * PART_MASS;
+const moduleIn = slot => modules.find(m => m.slot === slot && !m.carried);
+const mod = id => modules.find(m => m.id === id);
+const installed = id => { const m = mod(id); return m.slot >= 0 && !m.carried && !m.broken; };
+const sonarWorks = () => power() && panelOk() && sys.sonar && installed('SONAR');
+const pumpRunning = () => { const p = moduleIn(FLOOR_SLOT); return sys.pump && power() && p && p.id === 'PUMP' && !p.broken && !parts.pumpMech.broken && !parts.pumpMech.dead; };
+const airMaking = () => power() && installed('AIR');
+const armWorks = () => !arm.broken && power() && panelOk();
+const crankTurning = () => time - crank.lastT < CRANK_WINDOW;
+const doorOpenTo = () => 3 - 28 * hatch.progress;  // door slides up: the gap is open below this y
+const shuffle = a => { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 
-// The hull's drawn rotation: a fraction of the physics wobble so the interior stays readable
 const visAng = () => sub.ang * SUB_VIS_TILT;
-// Sub-local point -> world point, and back
 function subPoint([lx, ly]) {
   const a = visAng(), c = Math.cos(a), s = Math.sin(a);
   return { x: sub.x + lx * c - ly * s, y: sub.y + lx * s + ly * c };
@@ -186,112 +283,252 @@ function toLocal(p) {
   const a = -visAng(), c = Math.cos(a), s = Math.sin(a), dx = p.x - sub.x, dy = p.y - sub.y;
   return { x: dx * c - dy * s, y: dx * s + dy * c };
 }
-// Collision boxes in world space
 const subBoxes = () => SUB_BOXES.map(([x, y, w, h]) => ({ x: sub.x + x, y: sub.y + y, w, h }));
-// Mouse position in world space (through the main camera)
-const mouseWorld = () => ({ x: (mouse.x - cv.width / 2) / viewScale + cam.x,
-                            y: (mouse.y - cv.height / 2) / viewScale + cam.y });
+const mouseWorld = () => ({ x: (mouse.x - cv.width / 2) / viewScale + cam.x, y: (mouse.y - cv.height / 2) / viewScale + cam.y });
+const zoomEase = () => zoomT * zoomT * (3 - 2 * zoomT);
+// Is a sub-local point inside a slot (in the slot's own rotated frame)?
+function slotAt(p, pad = 4) {
+  for (let i = 0; i < SLOTS.length; i++) {
+    const s = SLOTS[i], c = Math.cos(-s.ang), sn = Math.sin(-s.ang), dx = p.x - s.c[0], dy = p.y - s.c[1];
+    const lx = dx * c - dy * sn, ly = dx * sn + dy * c;
+    if (Math.abs(lx) < s.w / 2 + pad && Math.abs(ly) < s.h / 2 + pad) return i;
+  }
+  return -1;
+}
+// Rail: polyline math so the arm base can run along it
+function railLength() { let L = 0; for (let i = 1; i < RAIL.length; i++) L += Math.hypot(RAIL[i][0] - RAIL[i - 1][0], RAIL[i][1] - RAIL[i - 1][1]); return L; }
+function railPoint(u) {
+  for (let i = 1; i < RAIL.length; i++) {
+    const [ax, ay] = RAIL[i - 1], [bx, by] = RAIL[i], l = Math.hypot(bx - ax, by - ay);
+    if (u <= l || i === RAIL.length - 1) { const f = clamp(u / l, 0, 1); return [ax + (bx - ax) * f, ay + (by - ay) * f]; }
+    u -= l;
+  }
+}
+function railClosest(p) {
+  let best = 0, bd = Infinity, acc = 0;
+  for (let i = 1; i < RAIL.length; i++) {
+    const [ax, ay] = RAIL[i - 1], [bx, by] = RAIL[i], l = Math.hypot(bx - ax, by - ay);
+    const f = clamp(((p.x - ax) * (bx - ax) + (p.y - ay) * (by - ay)) / (l * l), 0, 1);
+    const d = Math.hypot(ax + (bx - ax) * f - p.x, ay + (by - ay) * f - p.y);
+    if (d < bd) { bd = d; best = acc + f * l; }
+    acc += l;
+  }
+  return best;
+}
 
-// Seated monitors: round sonar screen on the left, terminal on the right
+// Seated monitors
 function monitorLayout() {
   const W = cv.width, H = cv.height;
-  // Leaves room at the top for the HUD/debug text
-  const R = Math.min(H * 0.34, W * 0.24), tw = Math.min(W * 0.28, 360), gap = 40;
+  const R = Math.min(H * 0.34, W * 0.24), tw = Math.min(W * 0.3, 380), gap = 40;
   const cx = (W - (2 * R + gap + tw)) / 2 + R, cy = H / 2 + 45;
-  return { cx, cy, R, tx: cx + R + gap, ty: cy - R, tw, th: 2 * R };
+  return { cx, cy, R, tx: cx + R + gap, ty: cy - R - 30, tw, th: 2 * R + 60 };
 }
-// Mouse position in world space as read off the sonar screen (sonar is centered on the sub)
 function sonarMouseWorld() {
   const L = monitorLayout(), k = MURK_RADIUS / L.R;
   return { x: sub.x + (mouse.x - L.cx) * k, y: sub.y + (mouse.y - L.cy) * k };
 }
-const wheelLayout = () => ({ cx: cv.width / 2, cy: cv.height / 2, R: Math.min(cv.width, cv.height) * 0.22 });
 
 // ===================== AUDIO =====================
-// Tiny square-wave beeps. The browser only allows audio after a click/keypress.
-let actx = null;
-function initAudio() { try { actx = actx || new AudioContext(); } catch (e) {} }
-function beep(freq, dur, delay = 0) {
+let actx = null, hum = null;
+function initAudio() {
+  if (actx) return;
+  try {
+    actx = new AudioContext();
+    // Engine hum: rises with the throttle so spool-up reads as weight, not input lag
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = 'triangle'; o.frequency.value = 50; g.gain.value = 0;
+    o.connect(g); g.connect(actx.destination); o.start();
+    hum = { o, g };
+  } catch (e) {}
+}
+function tone(freq, dur, delay = 0, type = 'square', vol = 0.04) {
   if (!actx) return;
   const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime + delay;
-  o.type = 'square'; o.frequency.value = freq; g.gain.value = 0.04;
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
   o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur);
 }
+const thud = () => { tone(70, 0.25, 0, 'sine', 0.25); tone(45, 0.3, 0.02, 'sine', 0.2); };
+const roar = () => { tone(38, 0.7, 0, 'sawtooth', 0.12); tone(55, 0.5, 0.1, 'sawtooth', 0.1); };
 
-// ===================== POWER + TERMINAL =====================
-// Terminal log. sev: 'good' | 'warn' | 'bad'. Beeps only if the terminal is alive to show it.
+// ===================== TERMINAL LOG =====================
 function log(t, sev = 'warn') {
-  term.log.push({ t, c: sev === 'good' ? '#4c8' : sev === 'bad' ? '#e44' : '#fa3' });
-  if (term.log.length > 40) term.log.shift();
-  if (time > 0 && terminalAlive()) beep(sev === 'bad' ? 300 : sev === 'good' ? 990 : 600, 0.07);
+  logLines.push({ t, c: sev === 'good' ? '#4c8' : sev === 'bad' ? '#e44' : '#fa3' });
+  if (logLines.length > 40) logLines.shift();
+  if (time > 0 && power()) tone(sev === 'bad' ? 300 : sev === 'good' ? 990 : 600, 0.07);
 }
-function cutPower(reason) {
-  if (!engine.running) return;
-  engine.running = false; engine.restart = 0; engine.alarm = 0;
-  term.backup = TERMINAL_BACKUP_TIME; alarmT = ALARM_LIGHT_TIME;
-  log(reason, 'bad'); log('POWER LOST - ON BACKUP', 'bad');
+
+// ===================== DIVES + QUOTA =====================
+// Dock phase: held at the top, 60 s of free repairs, free module swaps, buy hull hits, pay quota.
+function startDock(first) {
+  phase = 'dock'; dockT = DOCK_TIME; maxDepth = 0;
+  sub.x = DOCK_X; sub.y = DOCK_Y; sub.vx = sub.vy = 0;
+  if (!first) sub.hp = Math.max(sub.hp, Math.ceil(MAX_HP * HULL_FREE_FRACTION));
+  water = 0; pendingWater = 0; air = 1;
+  if (fuel > 0) { engine.state = 'running'; engine.report = null; engine.stopIn = 0; }
+  gen.on = true; gen.boot = 0; arm.hits = 0;
+  relics = RELIC_BAIT.concat(shuffle(RELIC_POOL).slice(0, RELICS_PER_DIVE - 2)).map(([x, y]) => ({ x, y, state: 'free' }));
+  scraps = shuffle(SCRAP_POOL).slice(0, SCRAP_PER_DIVE).map(([x, y]) => ({ x, y, state: 'free' }));
+  dots = []; pings = []; echoes = [];
+  log(first ? 'DOCKED. FREE REPAIRS 60s' : `DIVE ${divesDone} DONE. FREE REPAIRS 60s`, 'good');
+}
+function launch() {
+  if (phase !== 'dock') return;
+  phase = 'dive'; sub.vy = 60;
+  log('DIVING', 'good');
+}
+function endDive() {
+  divesDone++;
+  if (divesDone % DIVES_PER_QUOTA === 0) {
+    const pay = Math.min(coins, quota - paid); coins -= pay; paid += pay;
+    if (paid < quota) return fail('QUOTA MISSED');
+    quotasMet++; log(`QUOTA ${quota} MET`, 'good');
+    quota = Math.round(quota * QUOTA_GROWTH / 50) * 50; paid = 0;
+  }
+  startDock(false);
+}
+function payQuota() {
+  const pay = Math.min(coins, quota - paid);
+  if (pay <= 0) return;
+  coins -= pay; paid += pay; log(`PAID ${pay} TOWARD QUOTA`, 'good');
+}
+function buyHull() {
+  if (phase !== 'dock' || coins < HULL_HIT_COST || sub.hp >= MAX_HP) return;
+  coins -= HULL_HIT_COST; sub.hp = Math.min(MAX_HP, sub.hp + HIT_DAMAGE); log(`HULL +${HIT_DAMAGE}`, 'good');
+}
+function fail(reason) {
+  if (sub.dead) return;
+  sub.dead = true; failReason = reason;
+}
+
+// ===================== POWER + AIR =====================
+// Engine shutdown: report shows right away, engine stops REPORT_LEAD later. Type is fixed now, never re-rolled.
+function engineShutdown(report) {
+  if (engine.state !== 'running' || engine.stopIn > 0) return;
+  engine.report = report; engine.stopIn = REPORT_LEAD; engine.flooded = false;
+  if (report === 'prevention') { log('! ENGINE MALFUNCTION PREVENTION', 'warn'); tone(180, 0.4, 0, 'square', 0.06); }
+  else if (report === 'malfunction') { log('X ENGINE MALFUNCTION', 'bad'); tone(300, 0.12); tone(300, 0.12, 0.18); }
+  else log('FUEL EXHAUSTED', 'bad');
 }
 function updatePower(dt) {
-  if (!power()) {
-    term.backup = Math.max(0, term.backup - dt);       // terminal dies when backup runs out
-    if (alarmT > 0) {                                  // alarm lights + beeps for a while
-      alarmT -= dt;
-      if ((engine.alarm -= dt) <= 0) { beep(300, 0.12); engine.alarm = ALARM_INTERVAL; }
-    }
-    // Restart in progress (started by touching the engine and pressing E)
-    if (engine.restart > 0) {
-      if (!ok('engine')) { engine.restart = 0; }
-      else if ((engine.restart += dt) >= ENGINE_RESTART_TIME) {
-        engine.running = true; engine.restart = 0; alarmT = 0; term.backup = 0;
-        log('POWER RESTORED', 'good'); beep(660, 0.08); beep(990, 0.12, 0.1);
-      }
-    }
+  if (engine.stopIn > 0 && (engine.stopIn -= dt) <= 0) { engine.stopIn = 0; engine.state = 'off'; }
+  if (gen.boot > 0 && (gen.boot -= dt) <= 0) {
+    gen.boot = 0; sys = { sonar: true, pump: false, lights: true }; // power-on resets the panel switches
+    log('SYSTEMS ONLINE', 'good');
   }
-  if (power() && ok('propeller')) propAng += PROP_SPIN * dt;
+  darkT = power() ? 0 : darkT + dt;
+  if (engine.state === 'running' && phase === 'dive') {
+    const bus = gen.on && gen.boot <= 0;
+    fuel -= (FUEL_IDLE + (bus && sys.lights ? FUEL_LIGHTS : 0) + (bus && sys.sonar ? FUEL_SONAR : 0)
+           + (pumpRunning() ? FUEL_PUMP : 0) + Math.hypot(throttle.x, throttle.y) * FUEL_THRUST) * dt;
+    if (fuel <= 0) { fuel = 0; engineShutdown('fuel'); }
+  }
+  // Air: only the air generator module (powered, in any slot) makes air. The crank slows the loss.
+  if (airMaking() || phase === 'dock') air = Math.min(1, air + AIR_REFILL * dt);
+  else air -= dt / SUFFOCATE_TIME * (crankTurning() ? 1 - CRANK_EFFECT : 1);
+  if (air <= 0) { air = 0; fail('SUFFOCATED'); }
+  if (power() && !parts.propeller.broken) propAng += 18 * Math.hypot(throttle.x, throttle.y) * dt + 2 * dt;
 }
 
-// ===================== DAMAGE =====================
-// Every impact damages the carcass and the module nearest the impact point.
-// While the arm is tying a relic it soaks the hit instead (no carcass or module damage).
-// dirX = which way the impact throws things inside (-1 left, 1 right), used for the stumble.
-function takeHit(amount, dirX, pt) {
-  if (sub.immune > 0) return;
-  sub.immune = IMMUNITY_TIME; // shared immunity, whoever takes the hit
-  shake = SHAKE_TIME;
-  // Standing figure gets thrown and loses control for a moment
-  if (mode !== 'seated') {
-    wheel.active = false;
-    fig.stun = STUMBLE_TIME; fig.vx = (dirX || (Math.random() < 0.5 ? -1 : 1)) * STUMBLE_SPEED;
+// ===================== WATER =====================
+function updateWater(dt) {
+  const pour = Math.min(pendingWater, 0.08 * dt); pendingWater -= pour; water += pour;
+  if (parts.propeller.broken && hatch.progress > 0.3 && phase === 'dive') water += SHAFT_LEAK * dt;
+  if (engine.state !== 'running' && engine.report === 'malfunction' && !engine.flooded && hatch.progress > 0.3) {
+    engine.flooded = true; pendingWater += BAY_FLOOD; log('ENGINE BAY FLOODING', 'bad');
   }
-  if (power() && Math.random() < ENGINE_STALL_CHANCE) cutPower('ENGINE STALLED');
-  if (arm.held) {
-    arm.hits++;
-    log('ARM TOOK THE HIT', 'warn');
-    if (armBroken()) { arm.held.state = 'free'; arm.held = null; log('ARM BROKEN', 'bad'); }
-    return;
-  }
-  sub.hp = Math.max(0, sub.hp - amount);
-  if (sub.hp === 0) { sub.dead = true; return; }
-  damageNearestModule(pt);
-  log(`IMPACT - HULL ${sub.hp}/${MAX_HP}`, sub.hp < 60 ? 'bad' : 'warn');
+  if (pumpRunning()) {
+    if (water > 0) { water = Math.max(0, water - PUMP_RATE * dt); pumpSpark = 0; }
+    else if ((pumpSpark += dt) >= DRY_SPARK_TIME) {
+      parts.pumpMech.dead = true; pumpSpark = 0; air = Math.max(0, air - PUMP_BLAST_AIR);
+      kick(SHAKE_WALL * 2, 0); thud(); log('PUMP EXPLODED (RAN DRY)', 'bad');
+    }
+  } else pumpSpark = 0;
+  if (water >= 1) { water = 1; fail('FLOODED'); }
 }
-function damageNearestModule(pt) {
-  if (!pt) return;
-  const l = toLocal(pt);
-  const pos = { engine: boxCenter(ENGINE_BOX), propeller: PROP_POS, storage: boxCenter(STORAGE_BOX),
-                panel: boxCenter(PANEL_BOX), pump: boxCenter(PUMP_BOX), arm: [arm.baseX, RAIL_Y], sonar: sonarLocal() };
-  let best = null, bd = Infinity;
-  for (const k in pos) {
-    const d = Math.hypot(pos[k][0] - l.x, pos[k][1] - l.y);
-    if (d < bd) { bd = d; best = k; }
+// Water surface in sub-local y (crew room spans -36..41)
+const waterLineLocal = () => 41 - water * 77;
+
+// ===================== DAMAGE =====================
+function kick(amp, bias) { shake = SHAKE_TIME; shakeAmp = Math.max(shakeAmp * (shake / SHAKE_TIME), amp); shakeBias = bias; }
+function stumble(dirX) {
+  if (mode === 'seated') return;
+  grip = null; inv.open = false;
+  fig.stun = STUMBLE_TIME; fig.vx = (dirX || (Math.random() < 0.5 ? -1 : 1)) * STUMBLE_SPEED;
+}
+function damageHull(n) {
+  sub.hp = Math.max(0, sub.hp - n);
+  if (sub.hp === 0) fail('HULL IMPLODED');
+}
+function armHit() {
+  arm.hits++; log('ARM TOOK THE HIT', 'warn');
+  if (arm.hits >= ARM_MAX_HITS) {
+    arm.broken = true; log('ARM BROKEN', 'bad');
+    if (arm.held) { arm.held.state = 'free'; arm.held = null; }
   }
-  const m = modules[best];
-  if (m.hp <= 0) return;
-  m.hp--;
-  if (m.hp > 0) { log(`${MODULE_NAMES[best]} DAMAGED`, 'warn'); return; }
-  log(`${MODULE_NAMES[best]} BROKEN`, 'bad');
-  if (best === 'engine') cutPower('ENGINE DESTROYED');
-  if (best === 'arm' && arm.held) { arm.held.state = 'free'; arm.held = null; }
+}
+// Roll the parts on the side that hit. Each candidate rolls once, then is immune for a second.
+function rollParts(side) {
+  const cand = {
+    bottom: ['pumpMech', 'slot3'],
+    top:    ['storage', 'slot0'],
+    front:  ['panel', 'slot1'],
+    back:   ['slot2'],
+  }[side] || [];
+  for (const id of cand) {
+    if (id.startsWith('slot')) {
+      const m = moduleIn(+id[4]);
+      if (!m || m.broken || m.imm > 0) continue;
+      m.imm = PART_IMMUNITY;
+      if (Math.random() < PART_BREAK_CHANCE) { m.broken = true; log(`${m.id} MODULE BROKEN`, 'bad'); }
+      continue;
+    }
+    const p = parts[id];
+    if (p.broken || p.dead || p.imm > 0) continue;
+    p.imm = PART_IMMUNITY;
+    if (Math.random() < (id === 'storage' ? STORAGE_BREAK_CHANCE : PART_BREAK_CHANCE)) breakPart(id);
+  }
+}
+function breakPart(id) {
+  parts[id].broken = true;
+  if (id === 'panel') {
+    // Everything freezes as it is: switches, screens, and the throttle you were holding
+    frozenThrottle = { ...throttle };
+    snapshot = snapshotMonitors();
+    log('CONTROL PANEL FROZEN', 'bad');
+  } else if (id === 'storage') {
+    inv.open = false;
+    if (spare > 0) { spare--; log('STORAGE HIT - LOST A SPARE PART', 'bad'); } else log('STORAGE BROKEN', 'bad');
+  } else if (id === 'pumpMech') log('PUMP MECHANISM BROKEN', 'bad');
+  else if (id === 'propeller') log('PROPELLER DESTROYED', 'bad');
+}
+// Rock impact: dull thud, small shake
+function rockHit(side, dirX) {
+  kick(SHAKE_WALL, 0); thud(); stumble(dirX);
+  if (arm.held) { if (sub.hullImm <= 0) { sub.hullImm = HULL_IMMUNITY; armHit(); } return; }
+  if (sub.hullImm <= 0) {
+    sub.hullImm = HULL_IMMUNITY;
+    damageHull(HIT_DAMAGE);
+    if (Math.random() < PREVENTION_CHANCE) engineShutdown('prevention');
+  }
+  rollParts(side);
+}
+// Creature contact: big shake from the engine side. Always breaks the engine; works through propeller -> engine -> panel.
+function creatureHit(dirX) {
+  kick(SHAKE_CREATURE, -1); roar(); stumble(dirX);
+  engineShutdown('malfunction');
+  const pr = parts.propeller;
+  if (pr.imm <= 0) {
+    pr.imm = PART_IMMUNITY;
+    if (!pr.broken && Math.random() < PROP_BUMP_CHANCE) {
+      pr.bumps++;
+      if (pr.bumps >= PROP_BUMPS) breakPart('propeller'); else log(`PROPELLER DAMAGED ${pr.bumps}/${PROP_BUMPS}`, 'bad');
+    } else if (pr.broken && !parts.panel.broken && Math.random() < 0.5) breakPart('panel');
+  }
+  if (sub.hullImm > 0) return;
+  sub.hullImm = HULL_IMMUNITY;
+  if (arm.held) return armHit();
+  damageHull(CREATURE_DAMAGE);
 }
 
 // ===================== INPUT =====================
@@ -299,247 +536,320 @@ addEventListener('keydown', e => {
   initAudio();
   if (!e.repeat) {
     if (e.code === 'KeyF') toggleSeat();
-    if (e.code === 'KeyE') interact();
-    if (e.code === 'Escape') wheel.active = false;
+    if (e.code === 'KeyE') tapE();
+    if (e.code === 'Escape') { inv.open = false; grip = null; }
+    if (e.code === 'Space' && mode === 'seated') launch();
+    if (e.code === 'KeyH') buyHull();
+    if (e.code === 'KeyP') payQuota();
+    if (mode === 'seated' && ['Digit1', 'Digit2', 'Digit3'].includes(e.code)) toggleSystem(['sonar', 'pump', 'lights'][+e.code[5] - 1]);
+    if (e.code === 'KeyR' && sub.dead) reset();
   }
   keys[e.code] = true;
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
-  if (e.code === 'KeyR' && sub.dead) reset();
 });
-addEventListener('keyup', e => keys[e.code] = false);
-addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = false; drag = false; });
+addEventListener('keyup', e => { keys[e.code] = false; if (e.code === 'KeyE') hold.lock = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = false; grip = null; });
 cv.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
 cv.addEventListener('mousedown', e => {
   initAudio();
   if (e.button !== 0) return;
+  if (mode === 'seated') {
+    const b = termButtons.find(b => mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h);
+    if (b) { toggleSystem(b.id); return; }
+  }
+  // Storage inventory: click a module to take it in your hand
+  if (inv.open) {
+    const b = invButtons.find(b => mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h);
+    if (b) { carry = b.m; carry.carried = true; log(`TOOK ${carry.id}`, 'good'); }
+    inv.open = false; return;
+  }
   mouse.down = true;
-  // Standing: grab the sonar module out of its slot
-  if (mode === 'standing' && !wheel.active && !sub.dead) {
-    const p = toLocal(mouseWorld()), [x, y, w, h] = SLOTS[sonarMod.slot].box;
-    if (p.x > x - 4 && p.x < x + w + 4 && p.y > y - 4 && p.y < y + h + 4) drag = true;
+  if (mode === 'standing' && !sub.dead) {
+    const t = handTarget();
+    if (t && t.grip) grip = { id: t.id, last: null };
+    else if (t && t.click && t.can) clickAction(t);
   }
 });
-addEventListener('mouseup', e => {
-  if (e.button !== 0) return;
-  mouse.down = false;
-  if (!drag) return;
-  // Drop the sonar module into the nearest red slot (if close enough), otherwise it snaps back
-  drag = false;
-  const p = toLocal(mouseWorld());
-  let best = -1, bd = 18;
-  SLOTS.forEach((s, i) => { const [cx, cy] = boxCenter(s.box), d = Math.hypot(cx - p.x, cy - p.y); if (d < bd) { bd = d; best = i; } });
-  if (best >= 0 && best !== sonarMod.slot) { sonarMod.slot = best; log(`SONAR MOVED TO ${SLOTS[best].name} SLOT`, 'good'); }
-});
+addEventListener('mouseup', e => { if (e.button === 0) { mouse.down = false; grip = null; } });
 cv.addEventListener('contextmenu', e => e.preventDefault());
 function resize() { cv.width = innerWidth; cv.height = innerHeight; }
 addEventListener('resize', resize);
 
-// F: stand up from the chair, or sit back down (only next to the chair)
+function toggleSystem(id) {
+  if (!power() || !panelOk()) return; // frozen or dead panel: switches don't move
+  sys[id] = !sys[id];
+  tone(sys[id] ? 800 : 500, 0.05);
+}
 function toggleSeat() {
   if (sub.dead) return;
-  if (wheel.active) { wheel.active = false; return; }
-  if (mode === 'seated') { mode = 'standingUp'; standT = 0; Object.assign(fig, { x: CHAIR_X - 8, y: FLOOR_BOT, ladder: false, vx: 0, stun: 0 }); }
-  else if (mode === 'standing' && !fig.ladder && fig.y === FLOOR_BOT && Math.abs(fig.x - CHAIR_X) < USE_RANGE + 4) mode = 'seated';
+  if (mode === 'seated') {
+    mode = 'standingUp'; standT = 0;
+    Object.assign(fig, { x: 30, vx: 0, face: 1, turn: 0, stun: 0 });
+    hand = { x: 45, y: 10 };
+  } else if (mode === 'standing' && canSit()) { mode = 'seated'; grip = null; inv.open = false; }
 }
-// What's within reach of the standing figure
-function nearby() {
-  if (mode !== 'standing' || fig.ladder || fig.stun > 0) return null;
-  if (fig.y === FLOOR_TOP && fig.x < ENGINE_USE_X) return 'engine';
-  if (fig.y === FLOOR_TOP && Math.abs(fig.x - HATCH_X) < 10) return 'hatch';
-  if (fig.y === FLOOR_BOT && Math.abs(fig.x - CHAIR_X) < USE_RANGE + 4) return 'chair';
+const canSit = () => !carry && fig.stun <= 0 && fig.x >= SIT_RANGE[0] && fig.x <= SIT_RANGE[1];
+
+// ===================== THE HAND (standing) =====================
+// The mouse steers his hand, like the robot arm but inside. Reach is limited, he can only reach in front of
+// himself (turning takes a moment), and the hand can't go through walls (only through the open bay door).
+const shoulder = () => ({ x: fig.x + fig.face * 1.5, y: footY(fig.x) - FIG_HEIGHT * 0.72 });
+function handValid(p) {
+  if (inPoly(p, CREW_ROOM)) return true;
+  if (hatch.progress <= 0.05) return false;
+  return (inRect(p, DOOR_GAP) && p.y > doorOpenTo()) || inRect(p, ENGINE_ROOM);
+}
+function updateHand(dt) {
+  const s = shoulder(), m = toLocal(mouseWorld());
+  // Face the mouse; turning around takes TURN_TIME
+  const want = m.x >= fig.x ? 1 : -1;
+  if (fig.turn > 0) { if ((fig.turn -= dt) <= 0) { fig.turn = 0; fig.face = -fig.face; } }
+  else if (want !== fig.face && fig.stun <= 0 && !grip) fig.turn = TURN_TIME;
+  // Desired hand spot: toward the mouse, within reach, not behind him
+  let dx = m.x - s.x, dy = m.y - s.y;
+  const d = Math.hypot(dx, dy) || 1;
+  if (d > HAND_REACH) { dx *= HAND_REACH / d; dy *= HAND_REACH / d; }
+  if (dx * fig.face < -HAND_BEHIND) dx = -HAND_BEHIND * fig.face;
+  if (fig.turn > 0 || fig.stun > 0) { dx = fig.face * 6; dy = 10; }      // arm drops while turning/stumbling
+  // Walk out from the shoulder until something blocks it
+  let tx = s.x, ty = s.y;
+  for (let i = 1; i <= 16; i++) {
+    const p = { x: s.x + dx * i / 16, y: s.y + dy * i / 16 };
+    if (!handValid(p)) break;
+    tx = p.x; ty = p.y;
+  }
+  const k = 1 - Math.exp(-20 * dt);
+  hand.x += (tx - hand.x) * k; hand.y += (ty - hand.y) * k;
+}
+// What the hand is on. { id, hint, hold (s) / click / grip, can }
+function handTarget() {
+  if (mode !== 'standing' || fig.stun > 0 || fig.turn > 0 || inv.open) return null;
+  const h = hand, docked = phase === 'dock';
+  const repair = (id, name) => (!docked && spare <= 0) ? { id, hint: `${name}: NO SPARE PARTS`, can: false }
+    : { id, hint: `HOLD E: REPAIR ${name}${docked ? ' (FREE)' : ' (1 PART)'}`, hold: docked ? DOCK_REPAIR_TIME : REPAIR_TIME, can: true };
+  if (carry) {
+    const si = slotAt(h);
+    if (si >= 0) return { id: 'install', slot: si, click: true, can: true,
+      hint: `CLICK: INSTALL ${carry.id} IN ${SLOTS[si].name} SLOT${moduleIn(si) ? ' (SWAPS ' + moduleIn(si).id + ' INTO YOUR HAND)' : ''}` };
+    if (inPoly(h, STORAGE_POLY) || inRect(h, [46, -36, 59, 14])) return parts.storage.broken
+      ? { id: 'store', hint: 'STORAGE BROKEN', can: false } : { id: 'store', hint: `CLICK: PUT ${carry.id} IN STORAGE`, click: true, can: true };
+  }
+  if (dist(h, WHEEL_POS) < WHEEL_R + 3 && !carry) return { id: 'wheel', hint: 'HOLD LMB + CIRCLE: SPIN THE BAY WHEEL (clockwise opens)', grip: true, can: true };
+  if (dist(h, CRANK_POS) < CRANK_R + 4 && !carry) return { id: 'crank', hint: 'HOLD LMB + CIRCLE: AIR CRANK', grip: true, can: true };
+  if (inRect(h, ENGINE_BOX)) {
+    if (engine.state === 'running') return { id: 'engine', hint: 'ENGINE RUNNING', can: false };
+    if (engine.report === 'fuel') return { id: 'engine', hint: 'NO FUEL', can: false };
+    return { id: 'engine', hint: 'HOLD E: RESTART ENGINE', hold: engine.report === 'malfunction' ? RESTART_MALFUNCTION : RESTART_PREVENTION, can: true };
+  }
+  if (dist(h, BREAKER_POS) < 6) return { id: 'breaker', hint: gen.on ? 'HOLD E: CUT POWER' : 'HOLD E: POWER ON', hold: BREAKER_HOLD, can: true };
+  if (carry) return { id: 'carrying', hint: `CARRYING ${carry.id} - CLICK A RED SLOT OR THE STORAGE`, can: false };
+  const si = slotAt(h);
+  if (si >= 0) {
+    const m = moduleIn(si);
+    if (!m) return { id: 'slot', hint: `${SLOTS[si].name} SLOT EMPTY`, can: false };
+    const r = m.broken ? repair('slot' + si, m.id) : null;
+    return { id: 'slot' + si, slot: si, click: true, can: true, hold: r && r.can ? r.hold : 0,
+      hint: (r ? r.hint + '   ' : '') + `CLICK: TAKE ${m.id} OUT` };
+  }
+  if (inPoly(h, STORAGE_POLY) || inRect(h, [46, -36, 59, 14])) return parts.storage.broken ? repair('storage', 'STORAGE') : { id: 'storage', hint: 'E: OPEN STORAGE', can: true };
+  if (inRect(h, PUMP_BOX, 4)) {
+    if (parts.pumpMech.dead) return { id: 'pumpMech', hint: 'PUMP EXPLODED - GONE', can: false };
+    if (parts.pumpMech.broken) return repair('pumpMech', 'PUMP');
+  }
+  if (inPoly(h, PANEL_POLY) && parts.panel.broken) {
+    if (power() || gen.boot > 0) return { id: 'panel', hint: 'PANEL LIVE - CUT POWER (BREAKER IN THE ENGINE BAY)', can: false };
+    return repair('panel', 'PANEL');
+  }
   return null;
 }
-// E while standing: touch the engine to start a restart, or grab the hatch wheel
-function interact() {
+function holdAction(id) {
+  const docked = phase === 'dock';
+  if (id === 'engine') { engine.state = 'running'; engine.report = null; log('ENGINE RESTARTED', 'good'); tone(660, 0.08); tone(990, 0.12, 0.1); return; }
+  if (id === 'breaker') { gen.on = !gen.on; if (gen.on) gen.boot = BOOT_TIME; else log('POWER CUT', 'warn'); tone(120, 0.2, 0, 'square', 0.08); return; }
+  if (!docked) spare--;
+  if (id === 'panel') { parts.panel.broken = false; frozenThrottle = null; snapshot = null; log('PANEL REPAIRED', 'good'); }
+  else if (id === 'pumpMech') { parts.pumpMech.broken = false; log('PUMP REPAIRED', 'good'); }
+  else if (id === 'storage') { parts.storage.broken = false; log('STORAGE REPAIRED', 'good'); }
+  else if (id.startsWith('slot')) { const m = moduleIn(+id[4]); m.broken = false; log(`${m.id} REPAIRED`, 'good'); }
+}
+// Clicks: take a module out of a slot, put one in (swapping), or store it. Every hatch cycle traps a bucket of water.
+function clickAction(t) {
+  const bucket = () => { if (phase === 'dive') water += BUCKET; };
+  if (t.id === 'install') {
+    const other = moduleIn(t.slot);
+    carry.slot = t.slot; carry.carried = false; log(`${carry.id} -> ${SLOTS[t.slot].name} SLOT`, 'good');
+    carry = null; bucket();
+    if (other) { other.slot = -1; other.carried = true; carry = other; }
+  } else if (t.id === 'store') { carry.slot = -1; carry.carried = false; log(`${carry.id} STORED`, 'good'); carry = null; }
+  else if (t.id.startsWith('slot')) {
+    const m = moduleIn(t.slot);
+    m.slot = -1; m.carried = true; carry = m; bucket(); log(`TOOK ${m.id} OUT`, 'warn');
+  }
+}
+function tapE() {
   if (sub.dead || mode !== 'standing') return;
-  if (wheel.active) { wheel.active = false; return; }
-  const n = nearby();
-  if (n === 'engine') {
-    if (!ok('engine')) log('ENGINE DESTROYED - NO START', 'bad');
-    else if (power()) log('ENGINE ALREADY RUNNING', 'good');
-    else if (engine.restart === 0) { engine.restart = 0.001; log('ENGINE RESTART...', 'warn'); }
-  } else if (n === 'hatch') { wheel.active = true; wheel.last = null; }
+  if (inv.open) { inv.open = false; return; }
+  const t = handTarget();
+  if (t && t.id === 'storage' && t.can && !t.hold) { inv.open = true; hold.lock = true; }
+}
+function updateHold(dt) {
+  const t = keys.KeyE && !hold.lock ? handTarget() : null;
+  if (!t || !t.can || !t.hold) { hold.id = null; hold.t = 0; return; }
+  if (hold.id !== t.id) { hold.id = t.id; hold.t = 0; }
+  if ((hold.t += dt) >= t.hold) { holdAction(t.id); hold.id = null; hold.t = 0; hold.lock = true; }
+}
+// Gripping the wheel or crank: circle the mouse around it
+function updateGrip() {
+  if (!grip) return;
+  const c = grip.id === 'wheel' ? WHEEL_POS : CRANK_POS, r = grip.id === 'wheel' ? WHEEL_R : CRANK_R;
+  if (!mouse.down || dist(hand, c) > r + 10 || fig.stun > 0) { grip = null; return; }
+  const a = Math.atan2(hand.y - c[1], hand.x - c[0]);
+  if (grip.last !== null && dist(hand, c) > 2) {
+    const d = Math.atan2(Math.sin(a - grip.last), Math.cos(a - grip.last));
+    if (grip.id === 'wheel') hatch.progress = clamp(hatch.progress + d / (Math.PI * 2 * HATCH_TURNS), 0, 1);
+    else if (Math.abs(d) > 0.01) { crank.ang += d; crank.lastT = time; }
+  }
+  grip.last = a;
+}
+
+// ===================== FIGURE =====================
+function updateFigure(dt) {
+  if (mode === 'standingUp' && (standT += dt) >= STAND_UP_TIME) mode = 'standing';
+  if (mode !== 'standing' || sub.dead) return;
+  updateHand(dt);
+  updateGrip();
+  const h = inv.open || grip ? 0 : (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  const wade = waterLineLocal() < footY(fig.x) - 15 ? 0.55 : 1;   // water above the knees slows you
+  if (fig.stun > 0) { fig.stun -= dt; fig.vx *= Math.exp(-4 * dt); }
+  else {
+    const tv = h * WALK_SPEED * wade * (h && h !== fig.face ? 0.6 : 1);  // backing up is slower
+    fig.vx += clamp(tv - fig.vx, -WALK_ACCEL * dt, WALK_ACCEL * dt);
+  }
+  fig.x += fig.vx * dt; fig.walk += Math.abs(fig.vx) / WALK_SPEED * dt;
+  if (fig.x < WALK_X[0] || fig.x > WALK_X[1]) fig.vx = 0;
+  fig.x = clamp(fig.x, WALK_X[0], WALK_X[1]);
 }
 
 // ===================== PHYSICS =====================
 const boxHit = (a, r) => a.x + a.w > r.x && a.x < r.x + r.w && a.y + a.h > r.y && a.y < r.y + r.h;
-
-// Collision is axis-aligned (rotation is visual only). Move one axis, push the sub out by the
-// deepest overlap of any of its 3 boxes, then bounce/damage once (so two boxes on one wall don't double up).
 function collideAxis(axis) {
   const v = axis === 'x' ? 'vx' : 'vy', pos = axis, size = axis === 'x' ? 'w' : 'h';
-  let push = 0, pt = null;
+  let push = 0;
   for (const b of subBoxes()) for (const r of ROCKS) {
     if (!boxHit(b, r)) continue;
     const p = sub[v] > 0 ? r[pos] - (b[pos] + b[size]) : r[pos] + r[size] - b[pos];
-    if (Math.abs(p) > Math.abs(push)) {
-      push = p;
-      // Contact point = center of the overlap, used to pick which module takes the damage
-      pt = { x: (Math.max(b.x, r.x) + Math.min(b.x + b.w, r.x + r.w)) / 2,
-             y: (Math.max(b.y, r.y) + Math.min(b.y + b.h, r.y + r.h)) / 2 };
-    }
+    if (Math.abs(p) > Math.abs(push)) push = p;
   }
   if (!push) return;
   const speed = Math.abs(sub[v]), dir = Math.sign(sub[v]);
   sub[pos] += push;
-  sub[v] = -sub[v] * BOUNCE;          // bounce off the rock
-  sub.angV += (Math.random() - 0.5) * speed * 0.03; // knock it into a spin
-  if (speed > HIT_SPEED) takeHit(HIT_DAMAGE, axis === 'x' ? dir : 0, pt);
+  sub[v] = -sub[v] * BOUNCE;
+  sub.angV += (Math.random() - 0.5) * speed * 0.03;
+  // Direction decides what breaks: diving lands on the bottom, sideways hits nose or back, climbing scrapes the top
+  const side = axis === 'x' ? (dir > 0 ? 'front' : 'back') : (dir > 0 ? 'bottom' : 'top');
+  if (speed > HIT_SPEED) rockHit(side, axis === 'x' ? dir : 0);
 }
-
-// Stick figure: walk A/D on a floor, W/S on the ladder, stumble on hits, closed hatch blocks the corridor
-function updateFigure(dt) {
-  if (mode === 'standingUp' && (standT += dt) >= STAND_UP_TIME) mode = 'standing';
-  if (mode !== 'standing' || sub.dead) return;
-  if (wheel.active) { updateWheel(); return; }
-  const inBay = fig.x < HATCH_X;
-  const h = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
-  const v = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
-  if (fig.stun > 0) {                                  // stumbling: thrown along, no control
-    fig.stun -= dt;
-    if (!fig.ladder) { fig.x += fig.vx * dt; fig.vx *= Math.exp(-4 * dt); }
-  } else if (fig.ladder) {
-    fig.y = clamp(fig.y + v * CLIMB_SPEED * dt, FLOOR_TOP, FLOOR_BOT);
-    if (h && (fig.y === FLOOR_TOP || fig.y === FLOOR_BOT)) fig.ladder = false; // step off at either end
-  } else if (v && Math.abs(fig.x - LADDER_X) < 5) {
-    fig.ladder = true; fig.x = LADDER_X;               // grab the ladder
-  } else {
-    fig.x += h * WALK_SPEED * dt; fig.walk += Math.abs(h) * dt;
-  }
-  if (fig.ladder) return;
-  const [x0, x1] = fig.y === FLOOR_TOP ? CORRIDOR_X : CREW_X;
-  fig.x = clamp(fig.x, x0, x1);
-  if (fig.y === FLOOR_TOP && hatch.progress < HATCH_PASSABLE)
-    fig.x = inBay ? Math.min(fig.x, HATCH_X - 3) : Math.max(fig.x, HATCH_X + 3);
-}
-
-// Hatch wheel mini game: hold the mouse and spin it around the wheel. Clockwise opens, counter-clockwise seals.
-function updateWheel() {
-  const L = wheelLayout();
-  if (mouse.down) {
-    const a = Math.atan2(mouse.y - L.cy, mouse.x - L.cx);
-    if (wheel.last !== null) {
-      const d = Math.atan2(Math.sin(a - wheel.last), Math.cos(a - wheel.last));
-      const before = hatch.progress;
-      hatch.progress = clamp(hatch.progress + d / (Math.PI * 2 * HATCH_TURNS), 0, 1);
-      if (before < 1 && hatch.progress === 1) log('BAY HATCH OPEN', 'good');
-      if (before > 0 && hatch.progress === 0) log('BAY HATCH SEALED', 'good');
-    }
-    wheel.last = a;
-  } else wheel.last = null;
-  // Walking away lets go of the wheel
-  if (keys.KeyA || keys.KeyD || keys.KeyW || keys.KeyS || keys.ArrowLeft || keys.ArrowRight) wheel.active = false;
-}
-
-function update(dt) {
-  time += dt;
-  sub.immune -= dt;
-  updatePower(dt);
-  updateFigure(dt);
-  // Only steer from the chair, with power, a working propeller and a working control panel
-  const canSteer = !sub.dead && mode === 'seated' && power() && ok('propeller') && ok('panel');
-  if (canSteer || (!sub.dead && SINK_ENABLED)) {
-    // Thrust input (normalised so diagonals aren't faster)
-    let ix = canSteer ? (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0) : 0;
-    let iy = canSteer ? (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0) : 0;
-    const len = Math.hypot(ix, iy) || 1;
-    sub.vx += ix / len * THRUST * dt;
-    // Sink: a constant push whose terminal speed under drag equals SINK_SPEED
-    sub.vy += (iy / len * THRUST + (SINK_ENABLED ? SINK_SPEED * DRAG : 0)) * dt;
-  }
-  // Strong exponential drag = loose, floaty overshoot instead of instant stops
-  const d = Math.exp(-DRAG * dt);
-  sub.vx *= d; sub.vy *= d;
-
-  sub.x += sub.vx * dt; collideAxis('x');
-  sub.y += sub.vy * dt; collideAxis('y');
-  touchCreature();
-  updateArm(dt);
-
-  // Rotation lag: a damped spring chasing a tilt based on horizontal speed
-  const target = sub.vx * TILT_PER_SPEED;
-  sub.angV += (target - sub.ang) * ROT_STIFFNESS * dt;
-  sub.angV *= Math.exp(-ROT_DAMPING * dt);
-  sub.ang += sub.angV * dt;
-
-  // Camera eases toward the sub; zoom fits the sub on screen
-  viewScale = Math.min(VIEW_ZOOM, cv.width * 0.8 / 240, cv.height * 0.7 / 130);
-  const k = 1 - Math.exp(-6 * dt);
-  cam.x += (sub.x - cam.x) * k; cam.y += (sub.y - cam.y) * k;
-  shake = Math.max(0, shake - dt);
-
-  updateSonar(dt);
-  dots = dots.filter(p => time - p.t < p.fade);
-}
-
-// Creature contact: circle vs any of the sub's 3 boxes. Any touch hurts (shares hull immunity) and flings the sub away.
 function touchCreature() {
   const cr = CREATURE_SIZE / 2;
-  // Closest point on each box to the creature's center
-  let pt = null;
-  for (const b of subBoxes()) {
-    const px = Math.max(b.x, Math.min(CREATURE_X, b.x + b.w));
-    const py = Math.max(b.y, Math.min(CREATURE_Y, b.y + b.h));
-    if (Math.hypot(px - CREATURE_X, py - CREATURE_Y) < cr) { pt = { x: px, y: py }; break; }
-  }
-  if (!pt) return;
-  // Direction from creature to sub (fallback straight up if dead center)
+  const touching = subBoxes().some(b => {
+    const px = Math.max(b.x, Math.min(CREATURE_X, b.x + b.w)), py = Math.max(b.y, Math.min(CREATURE_Y, b.y + b.h));
+    return Math.hypot(px - CREATURE_X, py - CREATURE_Y) < cr;
+  });
+  if (!touching) return;
   let dx = sub.x - CREATURE_X, dy = sub.y - CREATURE_Y;
   const d = Math.hypot(dx, dy);
   if (d === 0) { dx = 0; dy = -1; } else { dx /= d; dy /= d; }
   sub.vx = dx * CREATURE_KNOCKBACK; sub.vy = dy * CREATURE_KNOCKBACK;
   sub.angV += (Math.random() - 0.5) * 8;
-  takeHit(CREATURE_DAMAGE, -Math.sign(dx), pt); // inside, things lurch toward the creature
+  creatureHit(-Math.sign(dx));
+}
+function updateSub(dt) {
+  let tx = 0, ty = 0;
+  if (!sub.dead && phase === 'dive') {
+    if (parts.panel.broken && frozenThrottle) { tx = frozenThrottle.x; ty = frozenThrottle.y; }
+    else if (mode === 'seated' && panelOk()) {
+      tx = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+      ty = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
+      const l = Math.hypot(tx, ty) || 1; tx /= l; ty /= l;
+    }
+  }
+  if (!power() || parts.propeller.broken) { tx = 0; ty = 0; }
+  if (water > ASCEND_LOCK) ty = Math.max(0, ty);
+  const k = Math.min(1, dt / (SPOOL_TIME * mass()));
+  throttle.x += (tx - throttle.x) * k; throttle.y += (ty - throttle.y) * k;
+
+  if (phase === 'dock') { sub.x = DOCK_X; sub.y = DOCK_Y; sub.vx = sub.vy = 0; }
+  else {
+    sub.vx += throttle.x * THRUST / mass() * dt;
+    sub.vy += (throttle.y * THRUST / mass() + (BASE_SINK + spare * PART_SINK) * DRAG) * dt;
+    const d = Math.exp(-DRAG * dt);
+    sub.vx *= d; sub.vy *= d;
+    sub.x += sub.vx * dt; collideAxis('x');
+    sub.y += sub.vy * dt; collideAxis('y');
+    touchCreature();
+    maxDepth = Math.max(maxDepth, sub.y);
+    if (sub.y < DIVE_RETURN_Y && maxDepth > DIVE_MIN_DEPTH && !sub.dead) endDive();
+  }
+  const target = sub.vx * TILT_PER_SPEED;
+  sub.angV += (target - sub.ang) * ROT_STIFFNESS / mass() * dt;
+  sub.angV *= Math.exp(-ROT_DAMPING * dt);
+  sub.ang += sub.angV * dt;
+  if (hum && actx) {
+    const on = power() ? 1 : 0, t = Math.hypot(throttle.x, throttle.y);
+    hum.o.frequency.setTargetAtTime(45 + 70 * t, actx.currentTime, 0.05);
+    hum.g.gain.setTargetAtTime(on * (0.015 + 0.035 * t), actx.currentTime, 0.1);
+  }
 }
 
-// ===================== ARM + LOOT =====================
-// The arm's base slides along a rail under the crew room. Hold E while seated to steer it with the
-// mouse on the sonar screen. Without power it hangs limp; powered but idle it freezes in place.
+// ===================== ROBOT ARM + LOOT =====================
+// The arm's base runs along the rail under the hull. Hold E while seated: it runs to the rail spot
+// closest to where you aim on the sonar, then reaches.
+const armBase = () => subPoint(railPoint(arm.u));
 function updateArm(dt) {
-  const working = !armBroken() && power() && ok('panel');
-  let base = subPoint([arm.baseX, RAIL_Y]);
+  let base = armBase();
   if (arm.held) {
-    // Claw stays clamped on the relic while tying; drifting out of reach or losing power cancels it
-    arm.tipX = arm.held.x; arm.tipY = arm.held.y;
-    arm.ox = arm.tipX - base.x; arm.oy = arm.tipY - base.y;
-    if (Math.hypot(arm.ox, arm.oy) > ARM_REACH || !working) {
-      arm.held.state = 'free'; arm.held = null;
-    } else if ((arm.tie += dt) >= TIE_TIME) {
-      arm.held.state = 'rising'; arm.held = null; // balloon on, let go
+    const h = arm.held;
+    arm.tipX = h.x; arm.tipY = h.y; arm.ox = h.x - base.x; arm.oy = h.y - base.y;
+    if (Math.hypot(arm.ox, arm.oy) > ARM_REACH || !armWorks() || mode !== 'seated') {
+      h.state = 'free'; arm.held = null;
+    } else if ((arm.tie += dt) >= (h.scrap ? SCRAP_GRAB_TIME : TIE_TIME)) {
+      if (h.scrap) {
+        if (parts.storage.broken) { log('STORAGE BROKEN - CAN\'T STORE', 'bad'); h.state = 'free'; }
+        else if (spare >= MAX_PARTS) { log('STORAGE FULL', 'warn'); h.state = 'free'; }
+        else { spare++; h.state = 'gone'; log(`SPARE PART +1 (${spare})`, 'good'); }
+      } else h.state = 'rising';
+      arm.held = null;
     }
     return updateBalloons(dt);
   }
-  if (mode === 'seated' && keys.KeyE && working && !sub.dead) {
-    // Slide the base toward the target's x along the rail, then reach toward it
-    const m = sonarMouseWorld(), lx = clamp(toLocal(m).x, RAIL_X[0], RAIL_X[1]);
-    arm.baseX += clamp(lx - arm.baseX, -ARM_SLIDE_SPEED * dt, ARM_SLIDE_SPEED * dt);
-    base = subPoint([arm.baseX, RAIL_Y]);
+  if (mode === 'seated' && keys.KeyE && armWorks() && !sub.dead && phase === 'dive') {
+    const m = sonarMouseWorld(), want = railClosest(toLocal(m));
+    arm.u += clamp(want - arm.u, -ARM_SLIDE_SPEED * dt, ARM_SLIDE_SPEED * dt);
+    base = armBase();
     const dx = m.x - base.x, dy = m.y - base.y, d = Math.hypot(dx, dy) || 1, reach = Math.min(d, ARM_REACH);
-    arm.ox = dx / d * reach; arm.oy = dy / d * reach;
+    const k = 1 - Math.exp(-12 * dt);
+    arm.ox += (dx / d * reach - arm.ox) * k; arm.oy += (dy / d * reach - arm.oy) * k;
     arm.tipX = base.x + arm.ox; arm.tipY = base.y + arm.oy;
-    // Auto-grab: claw overlapping a free relic starts the tie
-    const h = RELIC_SIZE / 2 + CLAW_RADIUS;
-    const r = relics.find(r => r.state === 'free' && Math.abs(r.x - arm.tipX) < h && Math.abs(r.y - arm.tipY) < h);
-    if (r) { r.state = 'tying'; arm.held = r; arm.tie = 0; }
-  } else if (!power() || armBroken()) {
-    // Limp: sags down
+    const hit = (o, s) => o.state === 'free' && Math.abs(o.x - arm.tipX) < s / 2 + CLAW_RADIUS && Math.abs(o.y - arm.tipY) < s / 2 + CLAW_RADIUS;
+    const r = relics.find(o => hit(o, RELIC_SIZE)) || scraps.find(o => hit(o, SCRAP_SIZE));
+    if (r) { r.state = 'tying'; r.scrap = scraps.includes(r); arm.held = r; arm.tie = 0; }
+  } else if (!power() || arm.broken) {
     const k = 1 - Math.exp(-3 * dt);
-    arm.ox += (0 - arm.ox) * k; arm.oy += (ARM_REACH * 0.6 - arm.oy) * k;
+    arm.ox += (Math.sin(time * 2.3) * 10 - sub.vx * 0.05 - arm.ox) * k;
+    arm.oy += (ARM_REACH * 0.6 - arm.oy) * k;
   }
   arm.tipX = base.x + arm.ox; arm.tipY = base.y + arm.oy;
   updateBalloons(dt);
 }
-// Ballooned relics rise straight up through everything; bank coins at the top of the cave
 function updateBalloons(dt) {
   for (const r of relics) {
     if (r.state !== 'rising') continue;
     r.y -= BALLOON_SPEED * dt;
-    if (r.y < -50) { r.state = 'gone'; coins += RELIC_VALUE; }
+    if (r.y < -50) { r.state = 'gone'; coins += RELIC_VALUE; log(`RELIC SOLD +${RELIC_VALUE}`, 'good'); }
   }
 }
 
 // ===================== SONAR =====================
-// Ray vs rectangle (slab method). Returns distance along ray or Infinity.
 function rayRect(ox, oy, dx, dy, r) {
   let tmin = 0, tmax = MURK_RADIUS;
   for (const [o, dd, lo, hi] of [[ox, dx, r.x, r.x + r.w], [oy, dy, r.y, r.y + r.h]]) {
@@ -551,7 +861,6 @@ function rayRect(ox, oy, dx, dy, r) {
   }
   return tmin;
 }
-// Ray vs the creature's circle. Returns distance along ray or Infinity.
 function rayCreature(ox, oy, dx, dy) {
   const fx = ox - CREATURE_X, fy = oy - CREATURE_Y, r = CREATURE_SIZE / 2;
   const b = fx * dx + fy * dy, c = fx * fx + fy * fy - r * r, disc = b * b - c;
@@ -561,216 +870,281 @@ function rayCreature(ox, oy, dx, dy) {
 }
 function castRay(o, ang) {
   const dx = Math.cos(ang), dy = Math.sin(ang);
-  let best = Infinity;
+  let best = Infinity, kind = 'rock';
   for (const r of ROCKS) best = Math.min(best, rayRect(o.x, o.y, dx, dy, r));
   const tc = rayCreature(o.x, o.y, dx, dy);
-  const creature = tc < best; // creature is in front of any rock on this ray
-  best = Math.min(best, tc);
-  // Relics are small boxes; any not yet banked can be pinged
-  let tr = Infinity;
-  for (const r of relics) {
-    if (r.state === 'gone') continue;
-    const s = RELIC_SIZE;
-    tr = Math.min(tr, rayRect(o.x, o.y, dx, dy, { x: r.x - s / 2, y: r.y - s / 2, w: s, h: s }));
-  }
-  const relic = tr < best;
-  best = Math.min(best, tr);
-  return { dist: Math.min(best, MURK_RADIUS), hit: best <= MURK_RADIUS, creature: creature && !relic, relic, dx, dy };
+  if (tc < best) { best = tc; kind = 'creature'; }
+  const boxes = (list, s, k) => {
+    for (const r of list) {
+      if (r.state === 'gone') continue;
+      const t = rayRect(o.x, o.y, dx, dy, { x: r.x - s / 2, y: r.y - s / 2, w: s, h: s });
+      if (t < best) { best = t; kind = k; }
+    }
+  };
+  boxes(relics, RELIC_SIZE, 'relic'); boxes(scraps, SCRAP_SIZE, 'scrap');
+  return { dist: Math.min(best, MURK_RADIUS), hit: best <= MURK_RADIUS, kind, dx, dy };
 }
-// A ping is a cone of rays fired from the sonar module (in whichever red slot it sits). Its wavefront grows at SOUND_SPEED.
-// The world is static, so each ray's hit distance is computed up front; the wave just "reveals" it over time.
-// When the wavefront reaches a hit, an echo spawns there and flies back to the module (wherever it is now).
-// The dot only appears when the echo arrives, so far walls show up late and moving fast outruns your info.
+// The sonar can only aim inside its slot's arc: where you mount it decides what you can see
+function sonarAim() {
+  const s = mod('SONAR'), slot = SLOTS[s.slot], o = subPoint(slot.c), m = sonarMouseWorld();
+  const faceA = Math.atan2(slot.face[1], slot.face[0]) + visAng();
+  const want = Math.atan2(m.y - o.y, m.x - o.x);
+  const rel = clamp(Math.atan2(Math.sin(want - faceA), Math.cos(want - faceA)), -SONAR_PORT_ARC, SONAR_PORT_ARC);
+  return { o, aim: faceA + rel, faceA };
+}
 function firePing() {
-  const o = subPoint(sonarLocal()), m = sonarMouseWorld();
-  const aim = Math.atan2(m.y - o.y, m.x - o.x);
+  const { o, aim } = sonarAim();
+  fuel -= FUEL_PING;
   const rays = [], stepA = PING_SPREAD / (PING_RAYS - 1);
-  const jitter = (Math.random() - 0.5) * stepA; // shift each ping a bit so repeats fill gaps
+  const jitter = (Math.random() - 0.5) * stepA;
   for (let i = 0; i < PING_RAYS; i++) {
     const r = castRay(o, aim - PING_SPREAD / 2 + stepA * i + jitter);
-    rays.push({ ...r, echoed: !r.hit }); // misses never echo
+    rays.push({ ...r, echoed: !r.hit });
   }
-  // Static: a few fake returns at random spots inside the cone, released when the wave gets there
   const noise = [];
   for (let i = 0; i < SONAR_NOISE; i++) {
     const a = aim + (Math.random() - 0.5) * PING_SPREAD;
-    noise.push({ dx: Math.cos(a), dy: Math.sin(a), dist: Math.random() * MURK_RADIUS, echoed: false });
+    noise.push({ dx: Math.cos(a), dy: Math.sin(a), dist: Math.random() * MURK_RADIUS, echoed: false, kind: 'rock' });
   }
   pings.push({ x: o.x, y: o.y, t: time, rays, noise });
 }
-
-// Turn a true hit into what the bad hardware reports: maybe nothing, otherwise a smeared, dimmer point.
 function spawnEcho(p, r) {
-  const f = r.dist / MURK_RADIUS;                      // 0 near, 1 at the murk edge
-  if (Math.random() < SONAR_DROPOUT * f) return;       // lost in the murk
+  const f = r.dist / MURK_RADIUS;
+  if (Math.random() < SONAR_DROPOUT * f) return;
   const err = r.dist * SONAR_JITTER;
   const hx = p.x + r.dx * r.dist + (Math.random() - 0.5) * 2 * err;
   const hy = p.y + r.dy * r.dist + (Math.random() - 0.5) * 2 * err;
-  echoes.push({ x: hx, y: hy, hx, hy, creature: r.creature, relic: r.relic, bright: 1 - SONAR_DIST_FADE * f });
+  echoes.push({ x: hx, y: hy, hx, hy, kind: r.kind, bright: 1 - SONAR_DIST_FADE * f });
 }
-
-const sonarWorks = () => power() && ok('panel') && ok('sonar');
 function updateSonar(dt) {
   pingTimer -= dt;
-  // Pinging needs the chair, power, the panel and the sonar module
-  if (mouse.down && !sub.dead && mode === 'seated' && sonarWorks() && pingTimer <= 0) { firePing(); pingTimer = PING_COOLDOWN; }
-
-  // Grow wavefronts, spawn echoes where they touch rock
+  if (mouse.down && !sub.dead && mode === 'seated' && phase === 'dive' && sonarWorks() && pingTimer <= 0) { firePing(); pingTimer = PING_COOLDOWN; }
   for (const p of pings) {
     const rad = (time - p.t) * SOUND_SPEED;
-    for (const r of p.rays.concat(p.noise)) {
-      if (!r.echoed && rad >= r.dist) { r.echoed = true; spawnEcho(p, r); }
-    }
+    for (const r of p.rays.concat(p.noise)) if (!r.echoed && rad >= r.dist) { r.echoed = true; spawnEcho(p, r); }
   }
   pings = pings.filter(p => (time - p.t) * SOUND_SPEED < MURK_RADIUS);
-
-  // Echoes home in on the sonar module; on arrival the hit point becomes a dot
-  const em = subPoint(sonarLocal());
+  const s = mod('SONAR'), em = subPoint(s.slot >= 0 ? SLOTS[s.slot].c : [0, 0]);
   for (const e of echoes) {
-    const dx = em.x - e.x, dy = em.y - e.y, d = Math.hypot(dx, dy);
-    const step = SOUND_SPEED * dt;
+    const dx = em.x - e.x, dy = em.y - e.y, d = Math.hypot(dx, dy), step = SOUND_SPEED * dt;
     if (d <= Math.max(step, 12)) {
       e.done = true;
-      // Snap to the coarse display grid
       dots.push({ x: Math.round(e.hx / SONAR_GRID) * SONAR_GRID, y: Math.round(e.hy / SONAR_GRID) * SONAR_GRID,
-                  t: time, creature: e.creature, relic: e.relic, bright: e.bright,
-                  fade: e.creature ? CREATURE_DOT_FADE : DOT_FADE_TIME });
-    }
-    else { e.x += dx / d * step; e.y += dy / d * step; }
+                  t: time, kind: e.kind, bright: e.bright, fade: e.kind === 'creature' ? CREATURE_DOT_FADE : DOT_FADE_TIME });
+    } else { e.x += dx / d * step; e.y += dy / d * step; }
   }
   echoes = echoes.filter(e => !e.done);
+  dots = dots.filter(p => time - p.t < p.fade);
 }
 
-// ===================== RENDER: WORLD + SUB =====================
-const alarmOn = () => !power() && alarmT > 0 && Math.floor(time * 2.5) % 2 === 0;
+// ===================== UPDATE =====================
+function update(dt) {
+  time += dt;
+  if (sub.dead) { updateSub(dt); return; }
+  runTime += dt;
+  sub.hullImm -= dt;
+  for (const k in parts) parts[k].imm -= dt;
+  for (const m of modules) m.imm -= dt;
+  if (phase === 'dock' && (dockT -= dt) <= 0) launch();
+  updatePower(dt);
+  updateWater(dt);
+  updateFigure(dt);
+  updateHold(dt);
+  updateSub(dt);
+  updateArm(dt);
+  const zt = mode === 'seated' ? 0 : 1;
+  zoomT += Math.sign(zt - zoomT) * Math.min(Math.abs(zt - zoomT), dt / ZOOM_TIME);
+  const zs = Math.min(ZOOM_STANDING, cv.width * 0.85 / 250, cv.height * 0.75 / 115);
+  viewScale = 1 + (zs - 1) * zoomEase();
+  const k = 1 - Math.exp(-6 * dt);
+  cam.x += (sub.x - cam.x) * k; cam.y += (sub.y - cam.y) * k;
+  shake = Math.max(0, shake - dt);
+  updateSonar(dt);
+}
+
+// ===================== RENDER HELPERS =====================
 const rect = (b, fill, stroke) => { if (fill) { ctx.fillStyle = fill; ctx.fillRect(...b); } if (stroke) { ctx.strokeStyle = stroke; ctx.strokeRect(...b); } };
 function poly(pts) { ctx.beginPath(); pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath(); }
-// Red X over a broken module
 function brokenX([x, y, w, h]) {
   ctx.strokeStyle = '#f33'; ctx.lineWidth = 0.8;
   ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + w, y + h); ctx.moveTo(x + w, y); ctx.lineTo(x, y + h); ctx.stroke();
 }
-function label(t, x, y) { ctx.fillStyle = '#ccd'; ctx.fillText(t, x, y); }
+function label(t, x, y, c = '#ccd') { ctx.fillStyle = c; ctx.fillText(t, x, y); }
+const redLight = () => !power() && darkT < RED_LIGHT_TIME && Math.floor(time * 2.5) % 2 === 0;
+function darkness() {
+  if (power()) return sys.lights ? 0 : 0.55;
+  return darkT < RED_LIGHT_TIME ? 0.5 : 0.94;
+}
+function roomsPath() { poly(CREW_ROOM); ctx.rect(...ENGINE_ROOM); ctx.rect(...DOOR_GAP); }
 
-// Whole sub in sub-local coordinates: hull, cutaway interior, modules, slots, figure, propeller
+// ===================== RENDER: SUB =====================
 function drawSub() {
-  const blink = sub.immune > 0 && Math.floor(time * 15) % 2 === 0; // flashes after a hit
+  const blink = sub.hullImm > 0.6 && Math.floor(time * 15) % 2 === 0;
   ctx.save(); ctx.translate(sub.x, sub.y); ctx.rotate(visAng());
   ctx.lineJoin = 'round';
-
-  // Propeller under the engine: stem + spinning X while powered (and not broken)
-  ctx.strokeStyle = ok('propeller') ? '#aaa' : '#844'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(PROP_POS[0], -20); ctx.lineTo(PROP_POS[0], PROP_POS[1]);
-  for (const a of [propAng, propAng + Math.PI / 2]) {
-    const c = Math.cos(a) * 7, s = Math.sin(a) * 7;
-    ctx.moveTo(PROP_POS[0] - c, PROP_POS[1] - s); ctx.lineTo(PROP_POS[0] + c, PROP_POS[1] + s);
+  // Propeller: purple disc on a shaft under the engine room; the inner hub orbits while it spins
+  const pr = parts.propeller;
+  rect([PROP_POS[0] - 3, 1, 6, PROP_POS[1] - 15], pr.broken ? '#533' : '#8a2bd0', '#111');
+  ctx.beginPath(); ctx.ellipse(PROP_POS[0], PROP_POS[1], 12, 15, 0, 0, Math.PI * 2);
+  ctx.fillStyle = pr.broken ? '#544' : pr.bumps ? '#c9a' : '#b98ad8'; ctx.fill(); ctx.strokeStyle = '#111'; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(PROP_POS[0] + Math.cos(propAng) * 3, PROP_POS[1] + Math.sin(propAng) * 3, 5, 7, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#56206e'; ctx.fill();
+  // Hull + rooms
+  poly(HULL_OUTLINE); ctx.fillStyle = blink ? '#a55' : '#555'; ctx.fill();
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = '#c5c5c5'; poly(CREW_ROOM); ctx.fill(); ctx.fillRect(...ENGINE_ROOM);
+  if (hatch.progress > 0.02) ctx.fillRect(DOOR_GAP[0], doorOpenTo(), DOOR_GAP[2], 3 - doorOpenTo());
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 0.9; poly(CREW_ROOM); ctx.stroke(); ctx.strokeRect(...ENGINE_ROOM);
+  // Water
+  const wl = waterLineLocal();
+  if (water > 0.001) {
+    ctx.save(); roomsPath(); ctx.clip();
+    ctx.fillStyle = 'rgba(40,110,200,0.55)'; ctx.fillRect(-120, wl, 240, 60 - wl);
+    ctx.restore();
   }
-  ctx.stroke();
-
-  // Hull shell + hollow rooms
-  poly(HULL_OUTLINE); ctx.fillStyle = blink ? '#a55' : '#7d838b'; ctx.fill();
-  ctx.strokeStyle = blink ? '#f66' : '#1a1d22'; ctx.lineWidth = 1.2; ctx.stroke();
-  const roomFill = power() ? '#2b3138' : '#15181c';
-  poly(CREW_ROOM); ctx.fillStyle = roomFill; ctx.fill();
-  rect(CORRIDOR, roomFill);
-  // Alarm: rooms flash red
-  if (alarmOn()) { ctx.fillStyle = 'rgba(255,30,30,0.28)'; poly(CREW_ROOM); ctx.fill(); ctx.fillRect(...CORRIDOR); }
-  // Ceiling lamps: warm when powered, red when the alarm blinks, dead otherwise
-  for (const lx of [-95, -40, 20, 70]) rect([lx - 3, -55, 6, 2], alarmOn() ? '#f33' : power() ? '#ffe9a0' : '#333');
-
   ctx.font = '4px monospace'; ctx.textAlign = 'center'; ctx.lineWidth = 0.6;
-
-  // Floors, landing, ladder
-  ctx.strokeStyle = '#555';
-  ctx.beginPath(); ctx.moveTo(-115, FLOOR_TOP); ctx.lineTo(10, FLOOR_TOP); ctx.moveTo(-5, FLOOR_BOT); ctx.lineTo(100, FLOOR_BOT); ctx.stroke();
-  ctx.strokeStyle = '#8a7'; ctx.beginPath();
-  ctx.moveTo(LADDER_X - 3, FLOOR_TOP - 6); ctx.lineTo(LADDER_X - 3, FLOOR_BOT); ctx.moveTo(LADDER_X + 3, FLOOR_TOP - 6); ctx.lineTo(LADDER_X + 3, FLOOR_BOT);
-  for (let y = FLOOR_TOP - 3; y < FLOOR_BOT; y += 6) { ctx.moveTo(LADDER_X - 3, y); ctx.lineTo(LADDER_X + 3, y); }
-  ctx.stroke();
-
-  // Engine (purple) + restart progress
-  rect(ENGINE_BOX, ok('engine') ? '#9b30ff' : '#4a2a5a', '#222'); label('ENGINE', -101, -43);
-  if (!ok('engine')) brokenX(ENGINE_BOX);
-  if (engine.restart > 0) { rect([-113, -30, 24, 2], '#222'); rect([-113, -30, 24 * engine.restart / ENGINE_RESTART_TIME, 2], '#fa3'); }
-
-  // Engine bay hatch: door slides up as the wheel opens it; wheel drawn on the corridor side
-  const doorH = 30 * (1 - hatch.progress);
-  rect([HATCH_X - 1.5, -55, 3, doorH], '#6b7078', '#333');
-  ctx.save(); ctx.translate(HATCH_X + 6, -40); ctx.rotate(hatch.progress * HATCH_TURNS * Math.PI * 2);
-  ctx.strokeStyle = '#d93'; ctx.lineWidth = 0.8; ctx.beginPath(); ctx.arc(0, 0, 3.5, 0, Math.PI * 2);
-  for (let i = 0; i < 3; i++) { const a = i * Math.PI / 1.5; ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a) * 3.5, Math.sin(a) * 3.5); }
-  ctx.stroke(); ctx.restore();
-  label('HATCH', HATCH_X, -57.5);
-
-  // Storage (orange), pump (blue), control panel (green, with its two little monitors)
-  rect(STORAGE_BOX, ok('storage') ? '#f90' : '#6a4a20', '#222'); label('STORAGE', 54, -49); if (!ok('storage')) brokenX(STORAGE_BOX);
-  rect(PUMP_BOX, ok('pump') ? '#1a6cff' : '#203050', '#222'); label('PUMP', 94, 42); if (!ok('pump')) brokenX(PUMP_BOX);
-  rect(PANEL_BOX, ok('panel') ? '#2c2' : '#244a24', '#222');
-  const scr = ok('panel') && power() ? '#062' : '#111';
-  rect([101.5, -18, 6, 8], scr); rect([101.5, -7, 6, 8], terminalAlive() ? '#062' : '#111');
-  label('PANEL', 104.5, -24); if (!ok('panel')) brokenX(PANEL_BOX);
-
-  // Red module slots (outlined), with the sonar module in one of them
-  ctx.strokeStyle = '#f22'; ctx.lineWidth = 0.8;
-  for (const s of SLOTS) ctx.strokeRect(...s.box);
-  if (!drag) drawSonarModule(...sonarLocal());
-  else { const p = toLocal(mouseWorld()); drawSonarModule(p.x, p.y); }
-
-  // Arm rail under the crew room
-  ctx.strokeStyle = '#999'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(RAIL_X[0] - 4, RAIL_Y); ctx.lineTo(RAIL_X[1] + 4, RAIL_Y); ctx.stroke();
-
-  // Chair, facing the panel (back on the left)
-  ctx.fillStyle = '#7a6448';
-  ctx.fillRect(CHAIR_X - 5, FLOOR_BOT - 12, 10, 2); ctx.fillRect(CHAIR_X - 6, FLOOR_BOT - 24, 2, 14); ctx.fillRect(CHAIR_X - 1, FLOOR_BOT - 10, 2, 10);
+  // Engine room: engine + breaker
+  rect(ENGINE_BOX, engine.state === 'running' ? '#9b1fd8' : '#5a2a7a', '#000');
+  ctx.fillStyle = '#56206e'; for (const [x, y] of [[-88, -26], [-74, -24], [-92, -14]]) { ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fill(); }
+  label('ENGINE', -82, -36, '#fff');
+  if (engine.state !== 'running' && engine.report) label(engine.report === 'malfunction' ? 'X' : engine.report === 'prevention' ? '!' : 'FUEL', -82, -10, engine.report === 'malfunction' ? '#f44' : '#fc3');
+  rect([BREAKER_POS[0] - 3, BREAKER_POS[1] - 4, 6, 8], '#333', '#000');
+  rect([BREAKER_POS[0] - 1, BREAKER_POS[1] + (gen.on ? -3 : 0), 2, 3], gen.on ? '#4c8' : '#e44');
+  label('BRK', BREAKER_POS[0], BREAKER_POS[1] - 5, '#333');
+  // Bay door (slides up as the wheel opens it) + wheel
+  rect([DOOR[0], DOOR[1], DOOR[2], DOOR[3] * (1 - hatch.progress)], '#e6dc00', '#000');
+  drawWheel(false);
+  // Storage (orange), panel (green), pump (blue)
+  poly(STORAGE_POLY); ctx.fillStyle = parts.storage.broken ? '#7a4a10' : '#ff8a00'; ctx.fill(); ctx.strokeStyle = '#000'; ctx.stroke();
+  label(`STORAGE  ${spare}/${MAX_PARTS} parts`, 80, -29, '#222'); if (parts.storage.broken) brokenX([58, -36, 44, 11]);
+  poly(PANEL_POLY); ctx.fillStyle = parts.panel.broken ? '#2a5a2a' : '#4cc23a'; ctx.fill(); ctx.strokeStyle = '#000'; ctx.stroke();
+  rect([97, -20, 6, 8], power() && panelOk() ? '#062' : '#111'); rect([98, -8, 7, 8], terminalAlive() ? '#062' : '#111');
+  label('PANEL', 95, 30, '#123'); if (parts.panel.broken) brokenX([83, 16, 24, 25]);
+  rect(PUMP_BOX, parts.pumpMech.dead ? '#111' : parts.pumpMech.broken ? '#202848' : '#26306e', '#000'); label('PUMP', 16.5, 47.5, '#aac');
+  if (parts.pumpMech.broken || parts.pumpMech.dead) brokenX(PUMP_BOX);
+  if (pumpSpark > 0) for (let i = 0; i < 6; i++) rect([6 + Math.random() * 20, 40 + Math.random() * 8, 1.5, 1.5], '#ff5');
+  // Air crank on the back wall
+  ctx.save(); ctx.translate(...CRANK_POS); ctx.rotate(crank.ang);
+  ctx.strokeStyle = '#444'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(0, 0, CRANK_R, 0, Math.PI * 2); ctx.moveTo(0, 0); ctx.lineTo(CRANK_R, 0); ctx.stroke();
+  ctx.fillStyle = '#444'; ctx.beginPath(); ctx.arc(CRANK_R, 0, 1.5, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  label('AIR CRANK', CRANK_POS[0], CRANK_POS[1] + 11, '#444');
+  // Module slots (red hatches) with whatever's in them
+  SLOTS.forEach((s, i) => {
+    ctx.save(); ctx.translate(...s.c); ctx.rotate(s.ang);
+    rect([-s.w / 2, -s.h / 2, s.w, s.h], '#c80d0d', '#000');
+    const m = moduleIn(i);
+    if (m) {
+      const w = Math.min(s.w, s.h) > 12 ? s.w - 6 : s.w - 2, h = Math.min(s.h - 2, 9);
+      ctx.rotate(s.h > s.w ? -Math.PI / 2 : 0);
+      const ww = s.h > s.w ? s.h - 6 : w;
+      rect([-ww / 2, -h / 2, ww, h], MODULE_COLORS[m.id], m.broken ? '#f33' : '#9fc');
+      label(m.id, 0, 1.4, m.broken ? '#f66' : '#dfe');
+    }
+    ctx.restore();
+  });
+  // Chair, facing the panel
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.moveTo(37, -10); ctx.lineTo(41, -11); ctx.lineTo(48, 33); ctx.lineTo(44, 34); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(46, 24); ctx.lineTo(74, 23); ctx.lineTo(76, 31); ctx.lineTo(46, 35); ctx.closePath(); ctx.fill();
+  ctx.fillRect(48, 37, 26, 2.5); ctx.fillRect(59, 34, 3, 4);
 
   drawFigure();
+  // Lighting: darkness over the rooms, red emergency blink, then only the wheel glows
+  const dk = darkness();
+  if (dk > 0) {
+    ctx.save(); roomsPath(); ctx.clip();
+    ctx.fillStyle = `rgba(0,0,0,${dk})`; ctx.fillRect(-120, -60, 240, 120);
+    if (redLight()) { ctx.fillStyle = 'rgba(255,20,20,0.25)'; ctx.fillRect(-120, -60, 240, 120); }
+    ctx.restore();
+    if (dk > 0.9) { drawWheel(true); ctx.globalAlpha = 0.25; drawFigure(); ctx.globalAlpha = 1; }
+  }
+  // Hold-E progress next to the hand
+  if (hold.id) {
+    const t = handTarget(), f = t && t.hold ? hold.t / t.hold : 0;
+    rect([hand.x - 8, hand.y - 9, 16, 2.5], '#222'); rect([hand.x - 8, hand.y - 9, 16 * f, 2.5], '#fa3');
+  }
   ctx.restore();
 }
-function drawSonarModule(x, y) {
-  rect([x - 6, y - 3, 12, 6], '#1b2b22', '#9fc');
-  ctx.fillStyle = !ok('sonar') ? '#f33' : sonarWorks() ? '#5f9' : '#355'; ctx.beginPath(); ctx.arc(x, y, 1.6, 0, Math.PI * 2); ctx.fill();
-  if (!ok('sonar')) brokenX([x - 6, y - 3, 12, 6]);
+function drawWheel(glow) {
+  ctx.save(); ctx.translate(...WHEEL_POS); ctx.rotate(hatch.progress * HATCH_TURNS * Math.PI * 2);
+  ctx.strokeStyle = glow ? '#ffe640' : '#e6dc00'; ctx.lineWidth = 3;
+  if (glow) { ctx.shadowColor = '#ffe640'; ctx.shadowBlur = 8; }
+  ctx.beginPath(); ctx.arc(0, 0, WHEEL_R - 1.5, 0, Math.PI * 2); ctx.stroke();
+  ctx.lineWidth = 2; ctx.beginPath();
+  for (let i = 0; i < 3; i++) { const a = i * Math.PI / 1.5 - Math.PI / 2; ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a) * WHEEL_R, Math.sin(a) * WHEEL_R); }
+  ctx.stroke(); ctx.restore();
 }
-// Stick figure: sitting facing the panel, standing/walking, climbing, or stumbling
+// Stick figure with a cap (brim = the way he faces) and one controllable arm
 function drawFigure() {
-  ctx.strokeStyle = '#f2f2f2'; ctx.lineWidth = 1; ctx.beginPath();
+  ctx.strokeStyle = '#000'; ctx.fillStyle = '#000'; ctx.lineWidth = 2.6; ctx.lineCap = 'round';
   if (mode === 'seated') {
-    const x = CHAIR_X - 2, y = FLOOR_BOT;
-    ctx.moveTo(x + 2.6, y - 25); ctx.arc(x, y - 25, 2.6, 0, Math.PI * 2);
-    ctx.moveTo(x, y - 22.4); ctx.lineTo(x - 1, y - 12);             // torso
-    ctx.lineTo(x + 7, y - 12); ctx.lineTo(x + 8, y);                 // thigh on the seat, shin down
-    ctx.moveTo(x, y - 19); ctx.lineTo(x + 9, y - 16);                // arm reaching to the panel
+    const hx = 60, hy = 23;   // hips on the seat
+    ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(hx - 1, hy - 16);           // torso
+    ctx.moveTo(hx, hy); ctx.lineTo(hx + 11, hy); ctx.lineTo(hx + 13, 39);       // thigh, shin
+    ctx.moveTo(hx - 1, hy - 14); ctx.lineTo(hx + 10, hy - 11); ctx.lineTo(95, 2); // arm on the panel
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(hx - 1, hy - 21, 4.6, 0, Math.PI * 2); ctx.fill();
+    drawCap(hx - 1, hy - 21, 1);
   } else {
-    const x = fig.x, y = fig.y;
-    const sw = fig.ladder ? 0 : Math.sin(fig.walk * 12) * 3.5 * (fig.stun > 0 ? 0 : 1);
-    const lean = fig.stun > 0 ? Math.sign(fig.vx) * 3.5 : 0;           // tipping over while stumbling
-    ctx.moveTo(x + lean + 2.6, y - 20); ctx.arc(x + lean, y - 20, 2.6, 0, Math.PI * 2);
-    ctx.moveTo(x + lean, y - 17.4); ctx.lineTo(x, y - 9);              // torso
-    ctx.lineTo(x + sw, y); ctx.moveTo(x, y - 9); ctx.lineTo(x - sw, y); // legs
-    if (fig.ladder) { ctx.moveTo(x - 3, y - 20); ctx.lineTo(x, y - 15); ctx.lineTo(x + 3, y - 20); } // arms up on the rungs
-    else { ctx.moveTo(x - 3 + lean, y - 11); ctx.lineTo(x + lean, y - 15); ctx.lineTo(x + 3 + lean, y - 11); }
+    const x = fig.x, fy = footY(x), f = fig.turn > 0 ? 0 : fig.face;
+    const sw = Math.sin(fig.walk * 10) * 5 * Math.min(1, Math.abs(fig.vx) / 15);
+    const lean = fig.stun > 0 ? Math.sign(fig.vx) * 4 : 0;
+    const hipY = fy - 20, neckY = fy - FIG_HEIGHT + 11;
+    ctx.beginPath();
+    ctx.moveTo(x + sw, fy); ctx.lineTo(x, hipY); ctx.lineTo(x - sw, fy);         // legs
+    ctx.moveTo(x, hipY); ctx.lineTo(x + lean, neckY);                             // torso
+    // Free arm hangs
+    ctx.moveTo(x + lean, neckY + 3); ctx.lineTo(x - (f || 1) * 3, neckY + 13); ctx.lineTo(x - (f || 1) * 2, neckY + 22);
+    // Controlled arm: shoulder -> elbow -> hand (two-bone, elbow bends down)
+    const s = shoulder(), dx = hand.x - s.x, dy = hand.y - s.y, d = Math.min(Math.hypot(dx, dy), HAND_REACH - 0.01);
+    const l = HAND_REACH / 2, mx = s.x + dx / 2, my = s.y + dy / 2, off = Math.sqrt(Math.max(0, l * l - (d / 2) ** 2));
+    let px = -dy, py = dx; const pl = Math.hypot(px, py) || 1; px /= pl; py /= pl; if (py < 0) { px = -px; py = -py; }
+    ctx.moveTo(s.x + lean, s.y); ctx.lineTo(mx + px * off, my + py * off); ctx.lineTo(hand.x, hand.y);
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(x + lean, neckY - 5, 4.6, 0, Math.PI * 2); ctx.fill();
+    drawCap(x + lean, neckY - 5, f);
+    // Hand (grips show as a ring) and whatever it carries
+    ctx.beginPath(); ctx.arc(hand.x, hand.y, 1.8, 0, Math.PI * 2); ctx.fill();
+    if (grip) { ctx.strokeStyle = '#fa3'; ctx.lineWidth = 0.8; ctx.beginPath(); ctx.arc(hand.x, hand.y, 3.5, 0, Math.PI * 2); ctx.stroke(); }
+    if (carry) { rect([hand.x - 7, hand.y - 3, 14, 6], MODULE_COLORS[carry.id], carry.broken ? '#f33' : '#9fc'); ctx.font = '4px monospace'; label(carry.id, hand.x, hand.y + 1.4, '#dfe'); }
   }
-  ctx.stroke();
+  ctx.lineCap = 'butt';
 }
-// Arm: from its sliding base on the rail to the claw. Broken = grey with a kink in it.
-// S maps world -> drawing coords, k scales sizes, lw = line width in drawing coords
+// Cap on top of the head; the brim points the way he faces (f = 0 while turning: brim centered)
+function drawCap(x, y, f) {
+  ctx.fillStyle = '#c22';
+  ctx.beginPath(); ctx.arc(x, y - 1.5, 4.8, Math.PI, 0); ctx.fill();
+  ctx.fillRect(f >= 0 ? x - 1 : x - 7.5, y - 2.2, f === 0 ? 2 : 8.5, 1.6);
+}
+// Robot arm: grey segments, orange pincer
 function drawArm(S, k, lw) {
-  const b = subPoint([arm.baseX, RAIL_Y]);
+  const b = armBase();
   const [bx, by] = S(b.x, b.y), [tx, ty] = S(arm.tipX, arm.tipY);
   const dx = tx - bx, dy = ty - by, d = Math.hypot(dx, dy) || 1, ux = dx / d, uy = dy / d;
-  ctx.strokeStyle = armBroken() ? '#777' : arm.held ? RELIC_COLOR : '#ccc'; ctx.lineWidth = lw;
-  ctx.beginPath(); ctx.moveTo(bx, by);
-  if (armBroken()) ctx.lineTo((bx + tx) / 2 - uy * 10 * k, (by + ty) / 2 + ux * 10 * k); // the bend
-  ctx.lineTo(tx, ty);
-  // Claw: two prongs, open normally, closed while holding
-  const open = arm.held ? 0.25 : 0.7, len = 8 * k, a = Math.atan2(uy, ux);
-  for (const s of [-1, 1]) { ctx.moveTo(tx, ty); ctx.lineTo(tx + Math.cos(a + s * open) * len, ty + Math.sin(a + s * open) * len); }
-  ctx.stroke();
-  // Tie progress ring around the claw
-  if (arm.held) { ctx.beginPath(); ctx.arc(tx, ty, 13 * k, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * arm.tie / TIE_TIME); ctx.stroke(); }
+  const bend = Math.sqrt(Math.max(0, (ARM_REACH * k) ** 2 - d * d)) * 0.35 + (arm.broken ? 10 * k : 0);
+  const ex = (bx + tx) / 2 - uy * bend, ey = (by + ty) / 2 + ux * bend;
+  ctx.strokeStyle = arm.broken ? '#666' : '#777'; ctx.lineWidth = lw * 1.6; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(ex, ey); ctx.lineTo(tx, ty); ctx.stroke();
+  ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(ex, ey, 2 * k, 0, Math.PI * 2); ctx.fill();
+  const a = Math.atan2(ty - ey, tx - ex), open = arm.held ? 0.15 : 0.55, len = 7 * k;
+  ctx.strokeStyle = arm.broken ? '#777' : arm.held ? RELIC_COLOR : '#f80'; ctx.lineWidth = lw * 1.3;
+  ctx.beginPath();
+  for (const s of [-1, 1]) {
+    const mx = tx + Math.cos(a + s * open) * len, my = ty + Math.sin(a + s * open) * len;
+    ctx.moveTo(tx, ty); ctx.lineTo(mx, my); ctx.lineTo(mx + Math.cos(a - s * 0.9) * len * 0.5, my + Math.sin(a - s * 0.9) * len * 0.5);
+  }
+  ctx.stroke(); ctx.lineCap = 'butt';
+  if (arm.held) {
+    const need = arm.held.scrap ? SCRAP_GRAB_TIME : TIE_TIME;
+    ctx.beginPath(); ctx.arc(tx, ty, 13 * k, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * arm.tie / need); ctx.stroke();
+  }
 }
-// Ballooned relics: relic box, string, balloon
+// Rail (green line under the hull), drawn in world space
+function drawRail(S, lw) {
+  ctx.strokeStyle = '#11661a'; ctx.lineWidth = lw * 2; ctx.lineCap = 'round';
+  ctx.beginPath(); RAIL.forEach((p, i) => { const w = subPoint(p), [x, y] = S(w.x, w.y); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.stroke();
+  ctx.lineCap = 'butt';
+}
 function drawBalloons(S, k) {
   for (const r of relics) {
     if (r.state !== 'rising') continue;
@@ -783,39 +1157,36 @@ function drawBalloons(S, k) {
 }
 
 // ===================== RENDER: MONITORS =====================
-// TV static for a broken screen
 function staticNoise(x, y, w, h) {
   for (let i = 0; i < 160; i++) { ctx.fillStyle = `rgba(200,200,200,${Math.random() * 0.5})`; ctx.fillRect(x + Math.random() * w, y + Math.random() * h, 3, 2); }
 }
-// Barotrauma-style round sonar: centered on the sub, edge of the screen = murk radius
+const DOT_COLORS = { rock: SONAR_COLOR, creature: '#f63', relic: RELIC_COLOR, scrap: '#cde' };
 function drawSonarScreen(L) {
   const { cx, cy, R } = L, k = R / MURK_RADIUS;
   const S = (x, y) => [cx + (x - sub.x) * k, cy + (y - sub.y) * k];
-  // Bezel with degree ticks
   ctx.fillStyle = '#26292e'; ctx.beginPath(); ctx.arc(cx, cy, R + 16, 0, Math.PI * 2); ctx.fill();
   ctx.strokeStyle = '#4a4f57'; ctx.lineWidth = 2; ctx.stroke();
-  ctx.strokeStyle = '#6a7'; ctx.lineWidth = 1; ctx.beginPath();
-  for (let i = 0; i < 36; i++) { const a = i * Math.PI / 18, l = i % 9 ? 5 : 10; ctx.moveTo(cx + Math.cos(a) * (R + 2), cy + Math.sin(a) * (R + 2)); ctx.lineTo(cx + Math.cos(a) * (R + 2 + l), cy + Math.sin(a) * (R + 2 + l)); }
-  ctx.stroke();
   ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
   ctx.fillStyle = '#010c06'; ctx.fillRect(cx - R, cy - R, 2 * R, 2 * R);
   ctx.textAlign = 'center'; ctx.font = 'bold 16px monospace';
-  if (!ok('panel')) { staticNoise(cx - R, cy - R, 2 * R, 2 * R); ctx.fillStyle = '#e44'; ctx.fillText('PANEL DAMAGED', cx, cy); }
-  else if (!power()) { ctx.fillStyle = alarmOn() ? '#a22' : '#411'; ctx.fillText('NO POWER', cx, cy); }
+  const s = mod('SONAR');
+  if (!power()) { ctx.fillStyle = gen.boot > 0 ? '#5a5' : '#411'; ctx.fillText(gen.boot > 0 ? 'BOOTING...' : 'NO POWER', cx, cy); }
   else {
-    // Range rings + crosshair
     ctx.strokeStyle = '#0c3a20'; ctx.lineWidth = 1; ctx.beginPath();
     for (const f of [1 / 3, 2 / 3]) { ctx.moveTo(cx + R * f, cy); ctx.arc(cx, cy, R * f, 0, Math.PI * 2); }
     ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R); ctx.stroke();
-    // Dots: chunky blocks, dimmer the further they came from, fading with age, blooming when fresh
+    if (installed('SONAR')) {
+      const { o, faceA, aim } = sonarAim(), [ox, oy] = S(o.x, o.y);
+      ctx.fillStyle = 'rgba(80,255,150,0.06)';
+      ctx.beginPath(); ctx.moveTo(ox, oy); ctx.arc(ox, oy, R * 2, faceA - SONAR_PORT_ARC - PING_SPREAD / 2, faceA + SONAR_PORT_ARC + PING_SPREAD / 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(80,255,150,0.25)'; ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox + Math.cos(aim) * R * 2, oy + Math.sin(aim) * R * 2); ctx.stroke();
+    }
     const g = Math.max(2, SONAR_GRID * k);
     for (const p of dots) {
-      const age = time - p.t, [x, y] = S(p.x, p.y), s = age < 0.2 ? g * 1.6 : g;
-      ctx.fillStyle = p.creature ? '#f63' : p.relic ? RELIC_COLOR : SONAR_COLOR;
-      ctx.globalAlpha = p.bright * (1 - age / p.fade);
-      ctx.fillRect(x - s / 2, y - s / 2, s, s);
+      const age = time - p.t, [x, y] = S(p.x, p.y), sz = age < 0.2 ? g * 1.6 : g;
+      ctx.fillStyle = DOT_COLORS[p.kind]; ctx.globalAlpha = p.bright * (1 - age / p.fade);
+      ctx.fillRect(x - sz / 2, y - sz / 2, sz, sz);
     }
-    // Outgoing wavefronts (flickery), returning echo specks
     ctx.strokeStyle = SONAR_COLOR; ctx.lineWidth = 1.5;
     for (const p of pings) {
       const rad = (time - p.t) * SOUND_SPEED;
@@ -831,142 +1202,183 @@ function drawSonarScreen(L) {
     ctx.globalAlpha = 0.5; ctx.fillStyle = SONAR_COLOR;
     for (const ec of echoes) { const [x, y] = S(ec.x, ec.y); ctx.fillRect(x - 1, y - 1, 2, 2); }
     ctx.globalAlpha = 1;
-    // Own sub outline, arm and balloons
     ctx.strokeStyle = '#3c9'; ctx.lineWidth = 1;
     ctx.beginPath(); HULL_OUTLINE.forEach((p, i) => { const w = subPoint(p), [x, y] = S(w.x, w.y); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.closePath(); ctx.stroke();
-    const em = subPoint(sonarLocal()), [ex, ey] = S(em.x, em.y);
-    ctx.fillStyle = '#9fc'; ctx.fillRect(ex - 2, ey - 2, 4, 4);
-    drawArm(S, k, 2); drawBalloons(S, k);
-    if (!ok('sonar')) { ctx.fillStyle = '#e44'; ctx.fillText('SONAR MODULE OFFLINE', cx, cy - R * 0.5); }
-    // Faint screen noise
+    drawArm(S, k, 1.5); drawBalloons(S, k);
+    ctx.fillStyle = '#e44';
+    if (!sys.sonar) ctx.fillText('SONAR SWITCHED OFF  [1]', cx, cy - R * 0.55);
+    else if (s.slot < 0 || s.carried) ctx.fillText('NO SONAR MODULE INSTALLED', cx, cy - R * 0.55);
+    else if (s.broken) ctx.fillText('SONAR MODULE BROKEN', cx, cy - R * 0.55);
+    if (phase === 'dock') { ctx.fillStyle = '#9cf'; ctx.fillText('DOCKED', cx, cy + R * 0.6); }
     for (let i = 0; i < 25; i++) { ctx.fillStyle = 'rgba(80,255,150,0.15)'; ctx.fillRect(cx - R + Math.random() * 2 * R, cy - R + Math.random() * 2 * R, 2, 2); }
   }
   ctx.restore();
   ctx.fillStyle = '#9ab'; ctx.font = '12px monospace'; ctx.textAlign = 'center';
-  ctx.fillText('LMB: PING    HOLD E: ARM    F: STAND UP', cx, cy + R + 36);
+  ctx.fillText('WASD: STEER   LMB: PING   HOLD E: ARM   F: STAND', cx, cy + R + 34);
 }
-// Terminal monitor: status, module health, message log. Dies 7s after a power cut.
 function drawTerminal(L) {
   const { tx: x, ty: y, tw: w, th: h } = L;
   ctx.fillStyle = '#26292e'; ctx.fillRect(x - 12, y - 12, w + 24, h + 24);
   ctx.strokeStyle = '#4a4f57'; ctx.lineWidth = 2; ctx.strokeRect(x - 12, y - 12, w + 24, h + 24);
   ctx.fillStyle = '#020a05'; ctx.fillRect(x, y, w, h);
-  if (!ok('panel')) { staticNoise(x, y, w, h); return; }
-  if (!terminalAlive()) return; // dead black screen
+  termButtons = [];
+  if (!terminalAlive()) return;
   ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
   ctx.textAlign = 'left'; ctx.font = '12px monospace';
   let ly = y + 20;
   const line = (t, c) => { ctx.fillStyle = c; ctx.fillText(t, x + 10, ly); ly += 16; };
   line('ENGINE TERMINAL', '#5f9');
-  if (power()) line('POWER: ONLINE', '#4c8');
-  else {
-    line('POWER: OFFLINE', Math.floor(time * 3) % 2 ? '#e44' : '#822');
-    line(`BACKUP: ${term.backup.toFixed(1)}s`, '#fa3');
-    if (engine.restart > 0) line(`RESTART ${Math.floor(100 * engine.restart / ENGINE_RESTART_TIME)}%`, '#fa3');
+  if (engine.report) {
+    const mal = engine.report === 'malfunction';
+    ctx.font = 'bold 26px monospace'; ctx.fillStyle = mal ? '#f33' : '#fc3';
+    ctx.fillText(mal ? 'X' : engine.report === 'prevention' ? '!' : '0', x + 10, ly + 14);
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText(mal ? 'ENGINE MALFUNCTION' : engine.report === 'prevention' ? 'ENGINE MALFUNCTION PREVENTION' : 'FUEL EXHAUSTED', x + 36, ly + 8);
+    ctx.font = '12px monospace'; ly += 26;
   }
-  line(`HULL: ${sub.hp}/${MAX_HP}`, sub.hp < 60 ? '#e44' : '#4c8');
-  // Module health bars
-  for (const k in modules) {
-    const hp = k === 'arm' && armBroken() ? 0 : modules[k].hp;
-    line(`${MODULE_NAMES[k].padEnd(13)} ${'#'.repeat(hp)}${'.'.repeat(MODULE_HP - hp)}`, hp === MODULE_HP ? '#4c8' : hp > 0 ? '#fa3' : '#e44');
-  }
+  if (!power()) {
+    line(gen.boot > 0 ? `BOOTING ${gen.boot.toFixed(1)}s` : 'POWER: OFFLINE - BACKUP', gen.boot > 0 ? '#5a5' : '#e44');
+    rect([x + 10, ly - 10, (w - 20) * Math.max(0, 1 - darkT / TERMINAL_BACKUP), 8], '#fa3'); ly += 8;
+  } else line('POWER: ONLINE', '#4c8');
+  const pc = v => `${Math.round(v * 100)}%`;
+  line(`FUEL ${pc(fuel)}   AIR ${pc(air)}${airMaking() ? '' : ' (NOT MAKING AIR)'}`, fuel < 0.2 || air < 0.3 || !airMaking() ? '#e44' : '#4c8');
+  line(`WATER ${pc(water)}${water > ASCEND_LOCK ? ' (CAN\'T ASCEND)' : ''}   HULL ${sub.hp}/${MAX_HP}`, water > ASCEND_LOCK || sub.hp <= HIT_DAMAGE ? '#e44' : '#4c8');
+  ly += 4;
+  ['sonar', 'pump', 'lights'].forEach((id, i) => {
+    const bx = x + 10 + i * ((w - 20) / 3), bw = (w - 20) / 3 - 6;
+    ctx.fillStyle = sys[id] ? '#164' : '#311'; ctx.fillRect(bx, ly - 12, bw, 18);
+    ctx.fillStyle = sys[id] ? '#5f9' : '#a55'; ctx.fillText(`[${i + 1}] ${id.toUpperCase()} ${sys[id] ? 'ON' : 'OFF'}`, bx + 4, ly + 1);
+    termButtons.push({ id, x: bx, y: ly - 12, w: bw, h: 18 });
+  });
+  ly += 24;
+  if (pumpSpark > 0) line('PUMP RUNNING DRY!', Math.floor(time * 8) % 2 ? '#ff5' : '#e44');
+  // Slots
+  line('SLOTS: ' + SLOTS.map((s, i) => { const m = moduleIn(i); return `${s.name}=${m ? m.id + (m.broken ? '!' : '') : '-'}`; }).join(' '), '#8ca');
+  const bad = [];
+  if (parts.propeller.broken) bad.push('PROPELLER DEAD'); else if (parts.propeller.bumps) bad.push(`PROPELLER ${parts.propeller.bumps}/${PROP_BUMPS}`);
+  if (parts.panel.broken) bad.push('PANEL FROZEN');
+  if (parts.storage.broken) bad.push('STORAGE');
+  if (parts.pumpMech.dead) bad.push('PUMP GONE'); else if (parts.pumpMech.broken) bad.push('PUMP');
+  if (arm.broken) bad.push('ARM'); else if (arm.hits) bad.push(`ARM ${arm.hits}/${ARM_MAX_HITS}`);
+  for (const m of modules) if (m.broken) bad.push(m.id + ' MODULE');
+  line(bad.length ? 'DAMAGE: ' + bad.join(', ') : 'DAMAGE: NONE', bad.length ? '#fa3' : '#4c8');
   ly += 6; line('-- LOG --', '#5f9');
   const room = Math.floor((y + h - ly) / 16);
-  for (const m of term.log.slice(-room)) line('> ' + m.t, m.c);
+  for (const m of logLines.slice(-room)) line('> ' + m.t, m.c);
   ctx.restore();
 }
-// Hatch wheel overlay: big valve wheel you spin with the mouse
-function drawWheel() {
-  const { cx, cy, R } = wheelLayout(), a = hatch.progress * HATCH_TURNS * Math.PI * 2;
-  ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, cv.width, cv.height);
-  ctx.save(); ctx.translate(cx, cy); ctx.rotate(a);
-  ctx.strokeStyle = '#d93'; ctx.lineWidth = 14; ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.stroke();
-  ctx.lineWidth = 8; ctx.beginPath();
-  for (let i = 0; i < 3; i++) { const s = i * Math.PI / 1.5; ctx.moveTo(0, 0); ctx.lineTo(Math.cos(s) * R, Math.sin(s) * R); }
-  ctx.stroke(); ctx.fillStyle = '#d93'; ctx.beginPath(); ctx.arc(0, 0, 16, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-  ctx.fillStyle = '#222'; ctx.fillRect(cx - R, cy + R + 30, 2 * R, 10);
-  ctx.fillStyle = '#d93'; ctx.fillRect(cx - R, cy + R + 30, 2 * R * hatch.progress, 10);
-  ctx.textAlign = 'center'; ctx.font = '14px monospace'; ctx.fillStyle = '#fff';
-  ctx.fillText(`HATCH ${Math.round(hatch.progress * 100)}% OPEN`, cx, cy - R - 40);
-  ctx.font = '12px monospace'; ctx.fillStyle = '#aaa';
-  ctx.fillText('hold LMB and spin: clockwise opens, counter-clockwise seals   (E / move to let go)', cx, cy + R + 64);
+function snapshotMonitors() {
+  const off = document.createElement('canvas'); off.width = cv.width; off.height = cv.height;
+  const keep = ctx; ctx = off.getContext('2d');
+  const L = monitorLayout(); drawSonarScreen(L); drawTerminal(L);
+  ctx = keep; termButtons = [];
+  return off;
+}
+// Storage inventory: stored modules as cards you click to take
+function drawInventory() {
+  const W = cv.width, H = cv.height, stored = modules.filter(m => m.slot < 0 && !m.carried);
+  const w = 420, h = 200, x = (W - w) / 2, y = (H - h) / 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, W, H);
+  rect([x, y, w, h], '#3a2a10', '#ff8a00');
+  ctx.textAlign = 'left'; ctx.font = 'bold 14px monospace'; ctx.fillStyle = '#ffb040'; ctx.fillText('STORAGE', x + 14, y + 24);
+  ctx.font = '12px monospace'; ctx.fillStyle = '#ddd'; ctx.fillText(`SPARE PARTS: ${spare}/${MAX_PARTS}`, x + 14, y + 44);
+  invButtons = [];
+  stored.forEach((m, i) => {
+    const bx = x + 14 + i * 100, by = y + 64;
+    rect([bx, by, 88, 70], MODULE_COLORS[m.id], m.broken ? '#f33' : '#9fc');
+    ctx.fillStyle = '#dfe'; ctx.font = 'bold 13px monospace'; ctx.fillText(m.id, bx + 8, by + 30);
+    ctx.font = '11px monospace'; ctx.fillStyle = m.broken ? '#f66' : '#8c8'; ctx.fillText(m.broken ? 'BROKEN' : 'OK', bx + 8, by + 50);
+    invButtons.push({ m, x: bx, y: by, w: 88, h: 70 });
+  });
+  if (!stored.length) { ctx.fillStyle = '#888'; ctx.fillText('no modules stored', x + 14, y + 100); }
+  ctx.fillStyle = '#aaa'; ctx.fillText('click a module to take it   -   E / click outside to close', x + 14, y + h - 14);
 }
 
 // ===================== RENDER =====================
+function bar(x, y, w, f, c, t) {
+  ctx.fillStyle = '#222'; ctx.fillRect(x, y, w, 10);
+  ctx.fillStyle = c; ctx.fillRect(x, y, w * clamp(f, 0, 1), 10);
+  ctx.strokeStyle = '#888'; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, w, 10);
+  ctx.fillStyle = '#ddd'; ctx.font = '11px monospace'; ctx.textAlign = 'left'; ctx.fillText(t, x + w + 6, y + 9);
+}
 function draw() {
-  const W = cv.width, H = cv.height;
+  const W = cv.width, H = cv.height, e = zoomEase();
   ctx.fillStyle = '#04101f'; ctx.fillRect(0, 0, W, H);
-  // Main camera: zoomed on the sub. The outside world is invisible (sonar only), but your own arm and balloons show.
-  const sk = SHAKE_AMOUNT * (shake / SHAKE_TIME);
+  const sk = shakeAmp * (shake / SHAKE_TIME) * (1 + 1.5 * e);
   ctx.save();
-  ctx.translate(W / 2 + (Math.random() - 0.5) * 2 * sk, H / 2 + (Math.random() - 0.5) * 2 * sk);
+  ctx.translate(W / 2 + (Math.random() - 0.5 + shakeBias * 0.4) * 2 * sk, H / 2 + (Math.random() - 0.5) * 2 * sk);
   ctx.scale(viewScale, viewScale);
   ctx.translate(-cam.x, -cam.y);
-  const I = (x, y) => [x, y]; // world coords as-is
-  drawBalloons(I, 1);
-  drawArm(I, 1, 2 / viewScale);
+  const I = (x, y) => [x, y];
+  drawRail(I, 1);
+  ctx.globalAlpha = 1 - (1 - DIM_STANDING) * e;   // outside dims when standing
+  drawBalloons(I, 1); drawArm(I, 1, 2 / viewScale);
+  ctx.globalAlpha = 1;
   drawSub();
   ctx.restore();
 
-  // Red alarm glow around the screen edges while the lights blink
-  if (alarmOn()) {
+  if (redLight()) {
     const gr = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.7);
-    gr.addColorStop(0, 'rgba(255,0,0,0)'); gr.addColorStop(1, 'rgba(255,0,0,0.45)');
+    gr.addColorStop(0, 'rgba(255,0,0,0)'); gr.addColorStop(1, 'rgba(255,0,0,0.4)');
     ctx.fillStyle = gr; ctx.fillRect(0, 0, W, H);
   }
-
-  // Seated: the two monitors pop up over a darkened view
   if (mode === 'seated' && !sub.dead) {
-    ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(0, 0, W, H);
     const L = monitorLayout();
-    drawSonarScreen(L); drawTerminal(L);
+    if (parts.panel.broken && snapshot && terminalAlive()) {
+      ctx.drawImage(snapshot, 0, 0); termButtons = [];
+      ctx.fillStyle = '#f44'; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('PANEL FROZEN', L.cx, L.cy - L.R - 24);
+    } else if (parts.panel.broken) { drawSonarScreen(L); drawTerminal(L); termButtons = []; }
+    else { drawSonarScreen(L); drawTerminal(L); }
   }
-  if (wheel.active) drawWheel();
+  if (inv.open) drawInventory();
 
-  // Hull bar (carcass)
-  ctx.fillStyle = '#222'; ctx.fillRect(16, 16, 200, 14);
-  ctx.fillStyle = sub.hp > 60 ? '#4c8' : '#e44'; ctx.fillRect(16, 16, 200 * sub.hp / MAX_HP, 14);
-  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.strokeRect(16.5, 16.5, 200, 14);
-  ctx.font = '10px monospace'; ctx.textAlign = 'left'; ctx.fillStyle = '#000'; ctx.fillText('HULL', 20, 27);
-
-  // Coins + arm status under the hull bar
+  bar(16, 14, 160, sub.hp / MAX_HP, sub.hp <= HIT_DAMAGE ? '#e44' : '#4c8', `HULL ${sub.hp}`);
+  bar(16, 30, 160, fuel, fuel < 0.2 ? '#e44' : '#db5', `FUEL ${Math.round(fuel * 100)}%`);
+  bar(16, 46, 160, air, air < 0.3 || !airMaking() ? '#e44' : '#9df', `AIR ${Math.round(air * 100)}%${airMaking() || phase === 'dock' ? '' : '  FALLING'}`);
+  bar(16, 62, 160, water, water > ASCEND_LOCK ? '#e44' : '#48f', `WATER ${Math.round(water * 100)}%`);
+  bar(16, 78, 160, Math.hypot(throttle.x, throttle.y), '#c8c', `THROTTLE (weight x${mass().toFixed(2)})`);
   ctx.font = '13px monospace'; ctx.textAlign = 'left';
-  ctx.fillStyle = RELIC_COLOR; ctx.fillText(`COINS ${coins}`, 16, 50);
-  const armHit = arm.hits > 0 || modules.arm.hp < MODULE_HP;
-  ctx.fillStyle = armBroken() ? '#e44' : armHit ? '#fa3' : '#4c8';
-  ctx.fillText(armBroken() ? 'ARM BROKEN' : armHit ? 'ARM HIT' : 'ARM OK', 16, 68);
+  ctx.fillStyle = RELIC_COLOR; ctx.fillText(`COINS ${coins}`, 16, 110);
+  ctx.fillStyle = '#ddd';
+  const left = DIVES_PER_QUOTA - (divesDone % DIVES_PER_QUOTA);
+  ctx.fillText(`QUOTA ${paid}/${quota}  due in ${left} dive${left > 1 ? 's' : ''}`, 16, 128);
+  ctx.fillText(`SPARE PARTS ${spare}/${MAX_PARTS}`, 16, 146);
+  ctx.fillStyle = arm.broken ? '#e44' : arm.hits ? '#fa3' : '#4c8';
+  ctx.fillText(arm.broken ? 'ARM BROKEN' : arm.hits ? 'ARM HIT' : 'ARM OK', 16, 164);
 
-  // Debug readout
-  ctx.font = '13px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = '#9cf';
-  const dbg = [`HP ${sub.hp}`, `SPD ${Math.hypot(sub.vx, sub.vy).toFixed(0)} px/s`, `DEPTH ${(sub.y / 10).toFixed(1)} m`,
-    `CREATURE ${(Math.hypot(sub.x - CREATURE_X, sub.y - CREATURE_Y) / 10).toFixed(1)} m`, `MODE ${mode}`,
-    `FIG ${fig.x.toFixed(0)},${fig.y.toFixed(0)}${fig.ladder ? ' ladder' : ''}`,
-    `MOD ${Object.keys(modules).map(k => k[0].toUpperCase() + modules[k].hp).join(' ')}`];
-  dbg.forEach((t, i) => ctx.fillText(t, W - 16, 24 + i * 18));
-
-  // Mode + context hint, top center
   ctx.textAlign = 'center'; ctx.font = 'bold 14px monospace';
+  if (phase === 'dock') {
+    ctx.fillStyle = '#9cf';
+    ctx.fillText(`DOCKED - FREE REPAIRS ${Math.ceil(dockT)}s - SPACE (seated) to dive - H: hull +${HIT_DAMAGE} (${HULL_HIT_COST}c) - P: pay quota`, W / 2, 20);
+  } else { ctx.fillStyle = '#7ab'; ctx.fillText(`DIVE ${divesDone + 1}   DEPTH ${(sub.y / 10).toFixed(0)} m`, W / 2, 20); }
   ctx.fillStyle = mode === 'seated' ? '#9cf' : '#fc6';
-  ctx.fillText(mode === 'seated' ? 'SEATED' : 'STANDING', W / 2, 24);
-  if (mode === 'standing' && !wheel.active) {
-    const n = nearby();
-    const hint = n === 'engine' ? (power() ? 'ENGINE RUNNING' : 'E: RESTART ENGINE') : n === 'hatch' ? 'E: HATCH WHEEL'
-      : n === 'chair' ? 'F: SIT' : fig.ladder ? 'W/S: CLIMB' : 'A/D: WALK   W/S at ladder   drag the sonar module between red slots';
-    ctx.font = '12px monospace'; ctx.fillStyle = '#ccc'; ctx.fillText(hint, W / 2, 42);
+  ctx.fillText(mode === 'seated' ? 'SEATED' : 'STANDING', W / 2, 40);
+  if (mode === 'standing') {
+    const t = handTarget();
+    const hint = grip ? (grip.id === 'wheel' ? `CIRCLE THE MOUSE - BAY ${Math.round(hatch.progress * 100)}% OPEN` : 'CIRCLE THE MOUSE TO CRANK AIR')
+      : t ? t.hint : canSit() ? 'F: SIT' : 'A/D: WALK   MOUSE: HAND   E: USE   LMB: GRAB';
+    ctx.font = '12px monospace'; ctx.fillStyle = '#ccc'; ctx.fillText(hint, W / 2, 58);
   }
+  ctx.font = '12px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = '#7ab';
+  const dbg = [`SPD ${Math.hypot(sub.vx, sub.vy).toFixed(0)}`, `CREATURE ${(Math.hypot(sub.x - CREATURE_X, sub.y - CREATURE_Y) / 10).toFixed(0)} m`,
+    `MODE ${mode}  FIG ${fig.x.toFixed(0)} face ${fig.face}`, `ENGINE ${engine.state}${engine.report ? ' ' + engine.report : ''}`, `RUN ${runTime.toFixed(0)}s  QUOTAS ${quotasMet}`];
+  dbg.forEach((t, i) => ctx.fillText(t, W - 12, 18 + i * 16));
 
   if (sub.dead) {
-    ctx.textAlign = 'center'; ctx.fillStyle = '#f44'; ctx.font = 'bold 48px monospace';
-    ctx.fillText('HULL IMPLODED', W / 2, H / 2);
-    ctx.font = '16px monospace'; ctx.fillStyle = '#fff';
-    ctx.fillText('press R to restart', W / 2, H / 2 + 34);
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, H / 2 - 60, W, 110);
+    ctx.textAlign = 'center'; ctx.fillStyle = '#f44'; ctx.font = 'bold 36px monospace';
+    ctx.fillText(`SUNK: ${failReason}`, W / 2, H / 2 - 15);
+    ctx.font = '15px monospace'; ctx.fillStyle = '#fff';
+    ctx.fillText(`lasted ${Math.floor(runTime / 60)}:${String(Math.floor(runTime % 60)).padStart(2, '0')}  -  quotas met: ${quotasMet}  -  press R to start over`, W / 2, H / 2 + 20);
   }
 }
+
 // ===================== LOOP =====================
 let last = performance.now();
 function frame(now) {
-  const dt = Math.min((now - last) / 1000, 1 / 30); // clamp so tab-switches don't teleport us
+  const dt = Math.min((now - last) / 1000, 1 / 30);
   last = now;
   update(dt); draw();
   requestAnimationFrame(frame);
