@@ -25,6 +25,10 @@ const MAX_HP        = 200;
 const IMMUNITY_TIME = 1.0;   // seconds of invulnerability after a hit
 const DOT_FADE_TIME = 6.0;   // seconds before a sonar dot disappears
 const SONAR_RANGE   = 900;   // px
+const SOUND_SPEED   = 650;   // px/s the ping and its echo travel; lower = longer wait for dots
+const PING_COOLDOWN = 0.7;   // seconds between pings while holding the mouse
+const PING_SPREAD   = 0.9;   // radians, width of the ping cone (Math.PI * 2 = all around)
+const PING_RAYS     = 70;    // resolution of each ping (= max dots per ping)
 const CUBE_SIZE     = 40;
 const START_X = 600, START_Y = 100;
 
@@ -45,12 +49,12 @@ const ROCKS = [
 // ===================== STATE =====================
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 const keys = {}, mouse = { x: 0, y: 0, down: false };
-let cube, cam, dots, prevAim, time;
+let cube, cam, dots, pings, echoes, pingTimer, time;
 
 function reset() {
   cube = { x: START_X, y: START_Y, vx: 0, vy: 0, ang: 0, angV: 0, hp: MAX_HP, immune: 0, dead: false };
   cam = { x: START_X, y: START_Y };
-  dots = []; prevAim = null; time = 0;
+  dots = []; pings = []; echoes = []; pingTimer = 0; time = 0;
 }
 
 // ===================== INPUT =====================
@@ -120,7 +124,7 @@ function update(dt) {
   const k = 1 - Math.exp(-6 * dt);
   cam.x += (cube.x - cam.x) * k; cam.y += (cube.y - cam.y) * k;
 
-  updateSonar();
+  updateSonar(dt);
   dots = dots.filter(p => time - p.t < DOT_FADE_TIME);
 }
 
@@ -143,20 +147,46 @@ function castRay(ang) {
   for (const r of ROCKS) best = Math.min(best, rayRect(cube.x, cube.y, dx, dy, r));
   return { dist: Math.min(best, SONAR_RANGE), hit: best <= SONAR_RANGE, dx, dy };
 }
-let beam = null; // last ray, for drawing
-function updateSonar() {
-  beam = null;
+// A ping is a cone of rays fired from where the cube was. Its wavefront grows at SOUND_SPEED.
+// The world is static, so each ray's hit distance is computed up front; the wave just "reveals" it over time.
+// When the wavefront reaches a hit, an echo spawns there and flies back to the cube (wherever it is now).
+// The dot only appears when the echo arrives, so far walls show up late and moving fast outruns your info.
+function firePing() {
   const aim = Math.atan2(mouse.y + cam.y - cv.height / 2 - cube.y, mouse.x + cam.x - cv.width / 2 - cube.x);
-  if (!mouse.down || cube.dead) { prevAim = null; return; }
-  // Fill in rays between last frame's angle and this one, so fast sweeps leave a continuous trail
-  let diff = prevAim === null ? 0 : Math.atan2(Math.sin(aim - prevAim), Math.cos(aim - prevAim));
-  const n = Math.min(40, Math.max(1, Math.ceil(Math.abs(diff) / 0.008)));
-  for (let i = 1; i <= n; i++) {
-    const ray = castRay(aim - diff * (1 - i / n));
-    if (ray.hit) dots.push({ x: cube.x + ray.dx * ray.dist, y: cube.y + ray.dy * ray.dist, t: time });
-    beam = ray;
+  const rays = [], stepA = PING_SPREAD / (PING_RAYS - 1);
+  const jitter = (Math.random() - 0.5) * stepA; // shift each ping a bit so repeats fill gaps
+  for (let i = 0; i < PING_RAYS; i++) {
+    const r = castRay(aim - PING_SPREAD / 2 + stepA * i + jitter);
+    rays.push({ ...r, echoed: !r.hit }); // misses never echo
   }
-  prevAim = aim;
+  pings.push({ x: cube.x, y: cube.y, t: time, rays });
+}
+
+function updateSonar(dt) {
+  pingTimer -= dt;
+  if (mouse.down && !cube.dead && pingTimer <= 0) { firePing(); pingTimer = PING_COOLDOWN; }
+
+  // Grow wavefronts, spawn echoes where they touch rock
+  for (const p of pings) {
+    const rad = (time - p.t) * SOUND_SPEED;
+    for (const r of p.rays) {
+      if (!r.echoed && rad >= r.dist) {
+        r.echoed = true;
+        const hx = p.x + r.dx * r.dist, hy = p.y + r.dy * r.dist;
+        echoes.push({ x: hx, y: hy, hx, hy });
+      }
+    }
+  }
+  pings = pings.filter(p => (time - p.t) * SOUND_SPEED < SONAR_RANGE);
+
+  // Echoes home in on the cube; on arrival the hit point becomes a visible dot
+  for (const e of echoes) {
+    const dx = cube.x - e.x, dy = cube.y - e.y, d = Math.hypot(dx, dy);
+    const step = SOUND_SPEED * dt;
+    if (d <= Math.max(step, half)) { e.done = true; dots.push({ x: e.hx, y: e.hy, t: time }); }
+    else { e.x += dx / d * step; e.y += dy / d * step; }
+  }
+  echoes = echoes.filter(e => !e.done);
 }
 
 // ===================== RENDER =====================
@@ -174,12 +204,24 @@ function draw() {
   }
   ctx.globalAlpha = 1;
 
-  // Beam
-  if (beam) {
-    ctx.strokeStyle = 'rgba(120,255,255,0.5)'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(cube.x, cube.y);
-    ctx.lineTo(cube.x + beam.dx * beam.dist, cube.y + beam.dy * beam.dist); ctx.stroke();
+  // Outgoing wavefronts: arc pieces between neighbouring rays that haven't hit rock yet
+  ctx.strokeStyle = '#7ff'; ctx.lineWidth = 1.5;
+  for (const p of pings) {
+    const rad = (time - p.t) * SOUND_SPEED;
+    ctx.globalAlpha = 0.6 * (1 - rad / SONAR_RANGE);
+    ctx.beginPath();
+    for (let i = 0; i < p.rays.length - 1; i++) {
+      const a = p.rays[i], b = p.rays[i + 1];
+      if (rad > a.dist || rad > b.dist) continue; // this slice already hit something
+      ctx.moveTo(p.x + a.dx * rad, p.y + a.dy * rad);
+      ctx.lineTo(p.x + b.dx * rad, p.y + b.dy * rad);
+    }
+    ctx.stroke();
   }
+  // Returning echoes: faint specks drifting back to the cube
+  ctx.globalAlpha = 0.45; ctx.fillStyle = '#bff';
+  for (const e of echoes) ctx.fillRect(e.x - 1, e.y - 1, 2, 2);
+  ctx.globalAlpha = 1;
 
   // Cube (blinks while immune)
   const blink = cube.immune > 0 && Math.floor(time * 15) % 2 === 0;
