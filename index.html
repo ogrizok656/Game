@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Dive Cube Prototype</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #061a33; }
+  canvas { display: block; cursor: crosshair; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// ===================== TUNING =====================
+const THRUST        = 900;   // px/s^2 acceleration from WASD/arrows
+const DRAG          = 2.2;   // per second; higher = stops sooner (top speed ~ THRUST/DRAG)
+const SINK_SPEED    = 35;    // px/s the cube drifts down to when you let go
+const TILT_PER_SPEED= 0.0012;// radians of tilt per px/s of horizontal speed
+const ROT_STIFFNESS = 40;    // how hard the cube rotates back toward its target tilt
+const ROT_DAMPING   = 3.5;   // low = wobbly, high = stiff
+const BOUNCE        = 0.45;  // fraction of impact speed kept after hitting rock
+const HIT_SPEED     = 170;   // px/s into the wall needed to take damage
+const HIT_DAMAGE    = 20;
+const MAX_HP        = 200;
+const IMMUNITY_TIME = 1.0;   // seconds of invulnerability after a hit
+const DOT_FADE_TIME = 6.0;   // seconds before a sonar dot disappears
+const SONAR_RANGE   = 900;   // px
+const CUBE_SIZE     = 40;
+const START_X = 600, START_Y = 100;
+
+// ===================== WORLD =====================
+// Rock rectangles [x, y, w, h]. The open cave is roughly x 0..1200, y -50..4200.
+const ROCKS = [
+  [-300, -300, 300, 4800], [1200, -300, 300, 4800],  // outer walls
+  [-300, -300, 1800, 250], [-300, 4200, 1800, 300],  // ceiling, floor
+  [0, 300, 350, 200], [850, 500, 350, 300],           // upper narrowing
+  [0, 900, 250, 500], [700, 1200, 500, 120],          // left bulge, right overhang shelf
+  [950, 1500, 250, 600], [550, 1650, 80, 80],         // right wall chunk, small boulder
+  [0, 1800, 450, 150], [500, 2000, 150, 100],         // left ledge, floating rock
+  [800, 2300, 400, 150], [0, 2600, 300, 400],         // right shelf, left bulge
+  [1000, 3000, 200, 500], [400, 3200, 250, 80],       // right wall, thin floating slab
+  [0, 3500, 200, 700], [900, 3800, 300, 120],         // bottom left wall, last overhang
+].map(([x, y, w, h]) => ({ x, y, w, h }));
+
+// ===================== STATE =====================
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const keys = {}, mouse = { x: 0, y: 0, down: false };
+let cube, cam, dots, prevAim, time;
+
+function reset() {
+  cube = { x: START_X, y: START_Y, vx: 0, vy: 0, ang: 0, angV: 0, hp: MAX_HP, immune: 0, dead: false };
+  cam = { x: START_X, y: START_Y };
+  dots = []; prevAim = null; time = 0;
+}
+
+// ===================== INPUT =====================
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
+  if (e.code === 'KeyR' && cube.dead) reset();
+});
+addEventListener('keyup', e => keys[e.code] = false);
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = false; });
+cv.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+cv.addEventListener('mousedown', e => { if (e.button === 0) mouse.down = true; });
+addEventListener('mouseup', e => { if (e.button === 0) mouse.down = false; });
+cv.addEventListener('contextmenu', e => e.preventDefault());
+function resize() { cv.width = innerWidth; cv.height = innerHeight; }
+addEventListener('resize', resize);
+
+// ===================== PHYSICS =====================
+const half = CUBE_SIZE / 2;
+const overlaps = (r) => cube.x + half > r.x && cube.x - half < r.x + r.w &&
+                        cube.y + half > r.y && cube.y - half < r.y + r.h;
+
+// Collision is axis-aligned (rotation is visual only). Move one axis, push out, report impact.
+function collideAxis(axis) {
+  const v = axis === 'x' ? 'vx' : 'vy';
+  for (const r of ROCKS) {
+    if (!overlaps(r)) continue;
+    const speed = Math.abs(cube[v]);
+    if (axis === 'x') cube.x = cube.vx > 0 ? r.x - half : r.x + r.w + half;
+    else              cube.y = cube.vy > 0 ? r.y - half : r.y + r.h + half;
+    cube[v] = -cube[v] * BOUNCE;          // bounce off the rock
+    cube.angV += (Math.random() - 0.5) * speed * 0.03; // knock it into a spin
+    if (speed > HIT_SPEED && cube.immune <= 0) {
+      cube.hp = Math.max(0, cube.hp - HIT_DAMAGE);
+      cube.immune = IMMUNITY_TIME;
+      if (cube.hp === 0) cube.dead = true;
+    }
+  }
+}
+
+function update(dt) {
+  time += dt;
+  cube.immune -= dt;
+  if (!cube.dead) {
+    // Thrust input (normalised so diagonals aren't faster)
+    let ix = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+    let iy = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
+    const len = Math.hypot(ix, iy) || 1;
+    cube.vx += ix / len * THRUST * dt;
+    // Sink: a constant push whose terminal speed under drag equals SINK_SPEED
+    cube.vy += (iy / len * THRUST + SINK_SPEED * DRAG) * dt;
+  }
+  // Strong exponential drag = loose, floaty overshoot instead of instant stops
+  const d = Math.exp(-DRAG * dt);
+  cube.vx *= d; cube.vy *= d;
+
+  cube.x += cube.vx * dt; collideAxis('x');
+  cube.y += cube.vy * dt; collideAxis('y');
+
+  // Rotation lag: a damped spring chasing a tilt based on horizontal speed
+  const target = cube.vx * TILT_PER_SPEED;
+  cube.angV += (target - cube.ang) * ROT_STIFFNESS * dt;
+  cube.angV *= Math.exp(-ROT_DAMPING * dt);
+  cube.ang += cube.angV * dt;
+
+  // Camera eases toward the cube
+  const k = 1 - Math.exp(-6 * dt);
+  cam.x += (cube.x - cam.x) * k; cam.y += (cube.y - cam.y) * k;
+
+  updateSonar();
+  dots = dots.filter(p => time - p.t < DOT_FADE_TIME);
+}
+
+// ===================== SONAR =====================
+// Ray vs rectangle (slab method). Returns distance along ray or Infinity.
+function rayRect(ox, oy, dx, dy, r) {
+  let tmin = 0, tmax = SONAR_RANGE;
+  for (const [o, dd, lo, hi] of [[ox, dx, r.x, r.x + r.w], [oy, dy, r.y, r.y + r.h]]) {
+    if (Math.abs(dd) < 1e-9) { if (o < lo || o > hi) return Infinity; continue; }
+    let t1 = (lo - o) / dd, t2 = (hi - o) / dd;
+    if (t1 > t2) [t1, t2] = [t2, t1];
+    tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
+    if (tmin > tmax) return Infinity;
+  }
+  return tmin;
+}
+function castRay(ang) {
+  const dx = Math.cos(ang), dy = Math.sin(ang);
+  let best = Infinity;
+  for (const r of ROCKS) best = Math.min(best, rayRect(cube.x, cube.y, dx, dy, r));
+  return { dist: Math.min(best, SONAR_RANGE), hit: best <= SONAR_RANGE, dx, dy };
+}
+let beam = null; // last ray, for drawing
+function updateSonar() {
+  beam = null;
+  const aim = Math.atan2(mouse.y + cam.y - cv.height / 2 - cube.y, mouse.x + cam.x - cv.width / 2 - cube.x);
+  if (!mouse.down || cube.dead) { prevAim = null; return; }
+  // Fill in rays between last frame's angle and this one, so fast sweeps leave a continuous trail
+  let diff = prevAim === null ? 0 : Math.atan2(Math.sin(aim - prevAim), Math.cos(aim - prevAim));
+  const n = Math.min(40, Math.max(1, Math.ceil(Math.abs(diff) / 0.008)));
+  for (let i = 1; i <= n; i++) {
+    const ray = castRay(aim - diff * (1 - i / n));
+    if (ray.hit) dots.push({ x: cube.x + ray.dx * ray.dist, y: cube.y + ray.dy * ray.dist, t: time });
+    beam = ray;
+  }
+  prevAim = aim;
+}
+
+// ===================== RENDER =====================
+function draw() {
+  const W = cv.width, H = cv.height;
+  ctx.fillStyle = '#061a33'; ctx.fillRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(Math.round(W / 2 - cam.x), Math.round(H / 2 - cam.y));
+
+  // Sonar dots, fading with age
+  ctx.fillStyle = '#7ff';
+  for (const p of dots) {
+    ctx.globalAlpha = 1 - (time - p.t) / DOT_FADE_TIME;
+    ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+
+  // Beam
+  if (beam) {
+    ctx.strokeStyle = 'rgba(120,255,255,0.5)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cube.x, cube.y);
+    ctx.lineTo(cube.x + beam.dx * beam.dist, cube.y + beam.dy * beam.dist); ctx.stroke();
+  }
+
+  // Cube (blinks while immune)
+  const blink = cube.immune > 0 && Math.floor(time * 15) % 2 === 0;
+  if (!blink) {
+    ctx.save(); ctx.translate(cube.x, cube.y); ctx.rotate(cube.ang);
+    ctx.strokeStyle = cube.immune > 0 ? '#f66' : '#fff'; ctx.lineWidth = 2;
+    ctx.strokeRect(-half, -half, CUBE_SIZE, CUBE_SIZE);
+    ctx.restore();
+  }
+  ctx.restore();
+
+  // Hull bar
+  ctx.fillStyle = '#222'; ctx.fillRect(16, 16, 200, 14);
+  ctx.fillStyle = cube.hp > 60 ? '#4c8' : '#e44'; ctx.fillRect(16, 16, 200 * cube.hp / MAX_HP, 14);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.strokeRect(16.5, 16.5, 200, 14);
+
+  // Debug readout
+  ctx.font = '13px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = '#9cf';
+  ctx.fillText(`HP ${cube.hp}`, W - 16, 24);
+  ctx.fillText(`SPD ${Math.hypot(cube.vx, cube.vy).toFixed(0)} px/s`, W - 16, 42);
+  ctx.fillText(`DEPTH ${(cube.y / 10).toFixed(1)} m`, W - 16, 60);
+
+  if (cube.dead) {
+    ctx.textAlign = 'center'; ctx.fillStyle = '#f44'; ctx.font = 'bold 48px monospace';
+    ctx.fillText('HULL FAILED', W / 2, H / 2);
+    ctx.font = '16px monospace'; ctx.fillStyle = '#fff';
+    ctx.fillText('press R to restart', W / 2, H / 2 + 34);
+  }
+}
+
+// ===================== LOOP =====================
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 1 / 30); // clamp so tab-switches don't teleport us
+  last = now;
+  update(dt); draw();
+  requestAnimationFrame(frame);
+}
+resize(); reset(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>
