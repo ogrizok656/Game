@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Dive Cube Prototype</title>
+<title>Dive Sub Prototype</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #061a33; }
   canvas { display: block; cursor: crosshair; }
@@ -14,9 +14,10 @@
 // ===================== TUNING =====================
 const THRUST        = 900;   // px/s^2 acceleration from WASD/arrows
 const DRAG          = 2.2;   // per second; higher = stops sooner (top speed ~ THRUST/DRAG)
-const SINK_SPEED    = 35;    // px/s the cube drifts down to when you let go
+const SINK_ENABLED  = false; // constant downward drift on/off
+const SINK_SPEED    = 35;    // px/s the sub drifts down to when you let go
 const TILT_PER_SPEED= 0.0012;// radians of tilt per px/s of horizontal speed
-const ROT_STIFFNESS = 40;    // how hard the cube rotates back toward its target tilt
+const ROT_STIFFNESS = 40;    // how hard the sub rotates back toward its target tilt
 const ROT_DAMPING   = 3.5;   // low = wobbly, high = stiff
 const BOUNCE        = 0.45;  // fraction of impact speed kept after hitting rock
 const HIT_SPEED     = 170;   // px/s into the wall needed to take damage
@@ -24,13 +25,55 @@ const HIT_DAMAGE    = 20;
 const MAX_HP        = 200;
 const IMMUNITY_TIME = 1.0;   // seconds of invulnerability after a hit
 const DOT_FADE_TIME = 6.0;   // seconds before a sonar dot disappears
-const SONAR_RANGE   = 900;   // px
+const MURK_RADIUS   = 380;   // px, hard cutoff: murky water kills the ping here, nothing past it echoes
 const SOUND_SPEED   = 650;   // px/s the ping and its echo travel; lower = longer wait for dots
 const PING_COOLDOWN = 0.7;   // seconds between pings while holding the mouse
 const PING_SPREAD   = 0.9;   // radians, width of the ping cone (Math.PI * 2 = all around)
 const PING_RAYS     = 70;    // resolution of each ping (= max dots per ping)
-const CUBE_SIZE     = 40;
+// Old, crappy sonar hardware (all effects scale with distance: 0 at the sub, full at MURK_RADIUS)
+const SONAR_JITTER   = 0.07; // dot position error as a fraction of distance (0.07 = ~27px off at the murk edge)
+const SONAR_DROPOUT  = 0.55; // chance a hit at the murk edge never comes back
+const SONAR_DIST_FADE= 0.75; // how much dimmer far dots are (0 = no falloff, 1 = invisible at the edge)
+const SONAR_GRID     = 6;    // px, dots snap to this coarse grid like a low-res display
+const SONAR_NOISE    = 3;    // fake returns (static) per ping
+const SONAR_FLICKER  = 0.3;  // chance each wave segment is missing on a given frame
+const SONAR_COLOR    = '#5f9'; // phosphor green
 const START_X = 600, START_Y = 100;
+// Creature
+const CREATURE_X        = 600;  // center, in the open pocket ~60% down the cave
+const CREATURE_Y        = 2520;
+const CREATURE_SIZE     = 70;   // blob diameter (collision + sonar use a circle)
+const CREATURE_DAMAGE   = 30;   // per touch, no speed threshold
+const CREATURE_KNOCKBACK= 500;  // px/s the sub gets flung away on contact
+const CREATURE_DOT_FADE = 9.0;  // creature dots linger longer than rock dots
+// Loot + arm
+const RELIC_SIZE     = 16;     // px, square
+const RELIC_VALUE    = 125;    // coins per relic sent up
+const RELIC_COLOR    = '#fd3'; // sonar dot color for relics
+const ARM_REACH      = 90;     // px from the arm mount to claw at full stretch
+const CLAW_RADIUS    = 6;      // grab tolerance around the claw tip
+const TIE_TIME       = 1.5;    // seconds to tie a balloon on; stay within ARM_REACH or it cancels
+const BALLOON_SPEED  = 400;    // px/s a ballooned relic rises
+const ARM_MAX_HITS   = 2;      // hits taken while tying before the arm breaks
+// Engine + terminal
+const ENGINE_STALL_CHANCE  = 0.4;  // chance any hit stalls the engine (no thrust, arm goes limp)
+const ENGINE_RESTART_TIME  = 3.0;  // seconds holding E at the engine bay door
+const TERMINAL_KILL_CHANCE = 0.3;  // chance any hit knocks the terminal out
+const TERMINAL_REBOOT_TIME = 7.0;  // seconds the terminal counts down before it's back
+const ALARM_INTERVAL       = 1.5;  // seconds between stall alarm beeps (only while the terminal is alive)
+const PROP_SPIN            = 18;   // rad/s propeller spin while the engine runs
+const SHAKE_TIME           = 0.35; // seconds of screen shake per hit
+const SHAKE_AMOUNT         = 8;    // screen px of shake at the start of a hit
+const SHAKE_ZOOMED_MULT    = 2.5;  // shake multiplier when fully zoomed in
+// Seated / standing
+const ZOOM_IN        = 3;      // camera scale when standing
+const ZOOM_TIME      = 0.6;    // seconds to zoom in or out (eased)
+const DIM_ZOOMED     = 0.3;    // outside world brightness when zoomed in
+const STAND_UP_TIME  = 0.5;    // seconds to get out of the chair
+const WALK_SPEED     = 30;     // interior px/s (interior px = sub-local px, 3x on screen when zoomed)
+const USE_RANGE      = 7;      // how close (interior px) the figure must be to the chair or engine door
+const STUMBLE_TIME   = 0.5;    // seconds of lost control after a hit while standing
+const STUMBLE_SPEED  = 45;     // interior px/s the figure gets thrown
 
 // ===================== WORLD =====================
 // Rock rectangles [x, y, w, h]. The open cave is roughly x 0..1200, y -50..4200.
@@ -46,92 +89,292 @@ const ROCKS = [
   [0, 3500, 200, 700], [900, 3800, 300, 120],         // bottom left wall, last overhang
 ].map(([x, y, w, h]) => ({ x, y, w, h }));
 
+// Relic centers [x, y], middle of the cave to the floor. The first two flank the creature (at 600, 2520).
+const RELIC_SPOTS = [
+  [490, 2545], [690, 2480],   // greed bait, right next to the creature
+  [780, 2150], [250, 2200],   // middle, open water
+  [900, 2750], [350, 3150],   // right pocket, beside the thin slab
+  [700, 3700], [500, 4185],   // lower cave, resting on the floor
+];
+
+// ===================== SUB SHAPE =====================
+// All in sub-local px, origin = sub position, +x = back (right), -x = nose (left). About 160x70 total.
+// Hook / C shape: long flat nose bar on top overhanging left, thick body on the right, a leg angling down under the nose.
+const SUB_POLYS = [
+  [[-80, -35], [0, -35], [0, -17], [-74, -17], [-80, -23]],              // nose bar
+  [[0, -35], [72, -35], [80, -27], [80, 27], [72, 32], [0, 32]],         // body
+  [[0, 10], [0, 32], [-32, 32], [-50, 20], [-50, 12], [-20, 10]],        // lower leg
+];
+// Collision boxes [x, y, w, h] roughly covering nose bar, body and leg (axis-aligned, rotation is visual only)
+const SUB_BOXES = [[-80, -35, 80, 18], [0, -35, 80, 67], [-50, 10, 50, 22]];
+const EMITTER   = [-72, -17];  // sonar emitter, underside of the nose, left end
+const ARM_MOUNT = [-62, -17];  // arm comes out right next to it
+const PROP_POS  = [90, 0];     // propeller hub, outside the back
+// Interior layout (body only). Floor and walkable span for the stick figure.
+const FLOOR_Y = 29, WALK_MIN = 6, WALK_MAX = 74;
+const TERMINAL_X = 26, CHAIR_X = 50, DOOR_X = 72;
+const BODY_CENTER = [40, 0];   // what the camera centers on when zoomed in
+
 // ===================== STATE =====================
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 const keys = {}, mouse = { x: 0, y: 0, down: false };
-let cube, cam, dots, pings, echoes, pingTimer, time;
+let sub, cam, dots, pings, echoes, pingTimer, time;
+let relics, arm, coins;
+let engine, term, mode, standT, fig, zoomT, shake, propAng;
+let viewScale = 1; // current camera zoom, used by mouseWorld()
 
 function reset() {
-  cube = { x: START_X, y: START_Y, vx: 0, vy: 0, ang: 0, angV: 0, hp: MAX_HP, immune: 0, dead: false };
+  sub = { x: START_X, y: START_Y, vx: 0, vy: 0, ang: 0, angV: 0, hp: MAX_HP, immune: 0, dead: false };
+  // Engine: restart = seconds E has been held at the door, alarm = time to next stall beep
+  engine = { running: true, restart: 0, alarm: 0 };
+  term = { reboot: 0 };            // > 0 while the terminal is dead and counting down
+  mode = 'seated'; standT = 0;     // 'seated' | 'standingUp' | 'standing'
+  fig = { x: CHAIR_X, vx: 0, stun: 0, walk: 0 }; // stick figure, interior px
+  zoomT = 0; shake = 0; propAng = 0;
   cam = { x: START_X, y: START_Y };
   dots = []; pings = []; echoes = []; pingTimer = 0; time = 0;
+  // Relic state: 'free' -> 'tying' (arm holding it) -> 'rising' (balloon on) -> 'gone' (banked)
+  relics = RELIC_SPOTS.map(([x, y]) => ({ x, y, state: 'free' }));
+  // Arm: tip = claw position, held = relic being tied, tie = seconds spent tying
+  // ox/oy = claw offset from the arm mount, kept so the arm can freeze or hang limp
+  arm = { tipX: START_X, tipY: START_Y, ox: -30, oy: 40, held: null, tie: 0, hits: 0, broken: false };
+  coins = 0;
+}
+
+// Mouse position in world space (accounts for zoom)
+const mouseWorld = () => ({ x: (mouse.x - cv.width / 2) / viewScale + cam.x,
+                            y: (mouse.y - cv.height / 2) / viewScale + cam.y });
+
+// Zoom progress eased in/out (smoothstep). 0 = seated view, 1 = fully zoomed into the interior.
+const zoomEase = () => zoomT * zoomT * (3 - 2 * zoomT);
+// The hull's drawn rotation. It straightens out as we zoom in so the interior reads unrotated.
+const visAng = () => sub.ang * (1 - zoomEase());
+// Sub-local point -> world point
+function subPoint([lx, ly]) {
+  const a = visAng(), c = Math.cos(a), s = Math.sin(a);
+  return { x: sub.x + lx * c - ly * s, y: sub.y + lx * s + ly * c };
+}
+// Collision boxes in world space
+const subBoxes = () => SUB_BOXES.map(([x, y, w, h]) => ({ x: sub.x + x, y: sub.y + y, w, h }));
+
+// ===================== AUDIO =====================
+// Tiny square-wave beeps for the terminal. The browser only allows audio after a click/keypress.
+let actx = null;
+function initAudio() { try { actx = actx || new AudioContext(); } catch (e) {} }
+function beep(freq, dur, delay = 0) {
+  if (!actx) return;
+  const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime + delay;
+  o.type = 'square'; o.frequency.value = freq; g.gain.value = 0.04;
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur);
+}
+
+// All hull damage goes through here. While the arm is tying a relic it soaks the hit instead.
+// dirX = which way the impact throws things inside (-1 left, 1 right), used for the stumble.
+function takeHit(amount, dirX = 0) {
+  if (sub.immune > 0) return;
+  sub.immune = IMMUNITY_TIME; // shared immunity, whoever takes the hit
+  shake = SHAKE_TIME;
+  // Standing figure gets thrown and loses control for a moment
+  if (mode !== 'seated') { fig.stun = STUMBLE_TIME; fig.vx = (dirX || (Math.random() < 0.5 ? -1 : 1)) * STUMBLE_SPEED; }
+  // Hits can stall the engine (terminal reports it instantly, with a beep, if it's alive)
+  if (engine.running && Math.random() < ENGINE_STALL_CHANCE) {
+    engine.running = false; engine.restart = 0; engine.alarm = ALARM_INTERVAL;
+    if (term.reboot <= 0) { beep(300, 0.12); beep(300, 0.12, 0.18); }
+  }
+  // ...and can knock the terminal out for a reboot countdown
+  if (term.reboot <= 0 && Math.random() < TERMINAL_KILL_CHANCE) term.reboot = TERMINAL_REBOOT_TIME;
+  if (arm.held) {
+    arm.hits++;
+    if (arm.hits >= ARM_MAX_HITS) { arm.broken = true; arm.held.state = 'free'; arm.held = null; }
+    return;
+  }
+  sub.hp = Math.max(0, sub.hp - amount);
+  if (sub.hp === 0) sub.dead = true;
 }
 
 // ===================== INPUT =====================
 addEventListener('keydown', e => {
+  initAudio();
+  if (e.code === 'KeyF' && !e.repeat) toggleMode();
   keys[e.code] = true;
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
-  if (e.code === 'KeyR' && cube.dead) reset();
+  if (e.code === 'KeyR' && sub.dead) reset();
 });
+// F: stand up from the chair, or sit back down (only when standing next to the chair)
+function toggleMode() {
+  if (sub.dead) return;
+  if (mode === 'seated') { mode = 'standingUp'; standT = 0; fig.x = CHAIR_X; fig.vx = 0; fig.stun = 0; }
+  else if (mode === 'standing' && Math.abs(fig.x - CHAIR_X) < USE_RANGE) mode = 'seated';
+}
 addEventListener('keyup', e => keys[e.code] = false);
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = false; });
 cv.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
-cv.addEventListener('mousedown', e => { if (e.button === 0) mouse.down = true; });
+cv.addEventListener('mousedown', e => { initAudio(); if (e.button === 0) mouse.down = true; });
 addEventListener('mouseup', e => { if (e.button === 0) mouse.down = false; });
 cv.addEventListener('contextmenu', e => e.preventDefault());
 function resize() { cv.width = innerWidth; cv.height = innerHeight; }
 addEventListener('resize', resize);
 
 // ===================== PHYSICS =====================
-const half = CUBE_SIZE / 2;
-const overlaps = (r) => cube.x + half > r.x && cube.x - half < r.x + r.w &&
-                        cube.y + half > r.y && cube.y - half < r.y + r.h;
+const boxHit = (a, r) => a.x + a.w > r.x && a.x < r.x + r.w && a.y + a.h > r.y && a.y < r.y + r.h;
 
-// Collision is axis-aligned (rotation is visual only). Move one axis, push out, report impact.
+// Collision is axis-aligned (rotation is visual only). Move one axis, push the sub out by the
+// deepest overlap of any of its 3 boxes, then bounce/damage once (so two boxes on one wall don't double up).
 function collideAxis(axis) {
-  const v = axis === 'x' ? 'vx' : 'vy';
-  for (const r of ROCKS) {
-    if (!overlaps(r)) continue;
-    const speed = Math.abs(cube[v]);
-    if (axis === 'x') cube.x = cube.vx > 0 ? r.x - half : r.x + r.w + half;
-    else              cube.y = cube.vy > 0 ? r.y - half : r.y + r.h + half;
-    cube[v] = -cube[v] * BOUNCE;          // bounce off the rock
-    cube.angV += (Math.random() - 0.5) * speed * 0.03; // knock it into a spin
-    if (speed > HIT_SPEED && cube.immune <= 0) {
-      cube.hp = Math.max(0, cube.hp - HIT_DAMAGE);
-      cube.immune = IMMUNITY_TIME;
-      if (cube.hp === 0) cube.dead = true;
-    }
+  const v = axis === 'x' ? 'vx' : 'vy', pos = axis, size = axis === 'x' ? 'w' : 'h';
+  let push = 0;
+  for (const b of subBoxes()) for (const r of ROCKS) {
+    if (!boxHit(b, r)) continue;
+    const p = sub[v] > 0 ? r[pos] - (b[pos] + b[size]) : r[pos] + r[size] - b[pos];
+    if (Math.abs(p) > Math.abs(push)) push = p;
   }
+  if (!push) return;
+  const speed = Math.abs(sub[v]), dir = Math.sign(sub[v]);
+  sub[pos] += push;
+  sub[v] = -sub[v] * BOUNCE;          // bounce off the rock
+  sub.angV += (Math.random() - 0.5) * speed * 0.03; // knock it into a spin
+  if (speed > HIT_SPEED) takeHit(HIT_DAMAGE, axis === 'x' ? dir : 0);
+}
+
+// Seated/standing, zoom, stick figure, engine restart, terminal reboot, alarm beeps
+function updateModes(dt) {
+  // Zoom toward the target view at a fixed speed; the easing happens in zoomEase()
+  const zoomTarget = mode === 'seated' ? 0 : 1;
+  zoomT += Math.sign(zoomTarget - zoomT) * Math.min(Math.abs(zoomTarget - zoomT), dt / ZOOM_TIME);
+  viewScale = 1 + (ZOOM_IN - 1) * zoomEase();
+
+  if (mode === 'standingUp' && (standT += dt) >= STAND_UP_TIME) mode = 'standing';
+  if (mode === 'standing' && !sub.dead) {
+    if (fig.stun > 0) {          // stumbling: thrown along, no control
+      fig.stun -= dt; fig.x += fig.vx * dt; fig.vx *= Math.exp(-4 * dt);
+    } else {                     // A/D walks
+      const dir = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+      fig.x += dir * WALK_SPEED * dt; fig.walk += Math.abs(dir) * dt;
+    }
+    fig.x = Math.max(WALK_MIN, Math.min(WALK_MAX, fig.x));
+  }
+
+  // Engine restart: hold E while standing at the engine bay door. Works with the terminal dead.
+  const atDoor = mode === 'standing' && fig.stun <= 0 && Math.abs(fig.x - DOOR_X) < USE_RANGE;
+  if (!engine.running && atDoor && keys.KeyE && !sub.dead) {
+    if ((engine.restart += dt) >= ENGINE_RESTART_TIME) {
+      engine.running = true; engine.restart = 0;
+      beep(660, 0.08); beep(990, 0.12, 0.1);
+    }
+  } else engine.restart = 0;
+
+  // Stall alarm keeps beeping while the terminal is alive to report it
+  if (!engine.running && term.reboot <= 0 && (engine.alarm -= dt) <= 0) { beep(300, 0.12); engine.alarm = ALARM_INTERVAL; }
+  // Terminal reboot countdown; beep when it's back
+  if (term.reboot > 0 && (term.reboot -= dt) <= 0) { term.reboot = 0; beep(880, 0.1); engine.alarm = 0.3; }
+
+  if (engine.running) propAng += PROP_SPIN * dt;
+  shake = Math.max(0, shake - dt);
 }
 
 function update(dt) {
   time += dt;
-  cube.immune -= dt;
-  if (!cube.dead) {
+  sub.immune -= dt;
+  updateModes(dt);
+  // Only steer from the chair with a running engine. Otherwise the sub just coasts.
+  const canSteer = !sub.dead && mode === 'seated' && engine.running;
+  if (canSteer || (!sub.dead && SINK_ENABLED)) {
     // Thrust input (normalised so diagonals aren't faster)
-    let ix = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
-    let iy = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
+    let ix = canSteer ? (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0) : 0;
+    let iy = canSteer ? (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0) : 0;
     const len = Math.hypot(ix, iy) || 1;
-    cube.vx += ix / len * THRUST * dt;
+    sub.vx += ix / len * THRUST * dt;
     // Sink: a constant push whose terminal speed under drag equals SINK_SPEED
-    cube.vy += (iy / len * THRUST + SINK_SPEED * DRAG) * dt;
+    sub.vy += (iy / len * THRUST + (SINK_ENABLED ? SINK_SPEED * DRAG : 0)) * dt;
   }
   // Strong exponential drag = loose, floaty overshoot instead of instant stops
   const d = Math.exp(-DRAG * dt);
-  cube.vx *= d; cube.vy *= d;
+  sub.vx *= d; sub.vy *= d;
 
-  cube.x += cube.vx * dt; collideAxis('x');
-  cube.y += cube.vy * dt; collideAxis('y');
+  sub.x += sub.vx * dt; collideAxis('x');
+  sub.y += sub.vy * dt; collideAxis('y');
+  touchCreature();
+  updateArm(dt);
 
   // Rotation lag: a damped spring chasing a tilt based on horizontal speed
-  const target = cube.vx * TILT_PER_SPEED;
-  cube.angV += (target - cube.ang) * ROT_STIFFNESS * dt;
-  cube.angV *= Math.exp(-ROT_DAMPING * dt);
-  cube.ang += cube.angV * dt;
+  const target = sub.vx * TILT_PER_SPEED;
+  sub.angV += (target - sub.ang) * ROT_STIFFNESS * dt;
+  sub.angV *= Math.exp(-ROT_DAMPING * dt);
+  sub.ang += sub.angV * dt;
 
-  // Camera eases toward the cube
+  // Camera eases toward the sub (seated) or the body center (zoomed in), blending with the zoom
+  const e = zoomEase(), bc = subPoint(BODY_CENTER);
+  const tx = sub.x + (bc.x - sub.x) * e, ty = sub.y + (bc.y - sub.y) * e;
   const k = 1 - Math.exp(-6 * dt);
-  cam.x += (cube.x - cam.x) * k; cam.y += (cube.y - cam.y) * k;
+  cam.x += (tx - cam.x) * k; cam.y += (ty - cam.y) * k;
 
   updateSonar(dt);
-  dots = dots.filter(p => time - p.t < DOT_FADE_TIME);
+  dots = dots.filter(p => time - p.t < p.fade);
+}
+
+// Creature contact: circle vs any of the sub's 3 boxes. Any touch hurts (shares hull immunity) and flings the sub away.
+function touchCreature() {
+  const cr = CREATURE_SIZE / 2;
+  // Closest point on each box to the creature's center
+  const touching = subBoxes().some(b => {
+    const px = Math.max(b.x, Math.min(CREATURE_X, b.x + b.w));
+    const py = Math.max(b.y, Math.min(CREATURE_Y, b.y + b.h));
+    return Math.hypot(px - CREATURE_X, py - CREATURE_Y) < cr;
+  });
+  if (!touching) return;
+  // Direction from creature to sub (fallback straight up if dead center)
+  let dx = sub.x - CREATURE_X, dy = sub.y - CREATURE_Y;
+  const d = Math.hypot(dx, dy);
+  if (d === 0) { dx = 0; dy = -1; } else { dx /= d; dy /= d; }
+  sub.vx = dx * CREATURE_KNOCKBACK; sub.vy = dy * CREATURE_KNOCKBACK;
+  sub.angV += (Math.random() - 0.5) * 8;
+  takeHit(CREATURE_DAMAGE, -Math.sign(dx)); // inside, things lurch toward the creature
+}
+
+// ===================== ARM + LOOT =====================
+function updateArm(dt) {
+  const mount = subPoint(ARM_MOUNT);
+  if (arm.held) {
+    // Claw stays clamped on the relic while tying; drifting out of reach or the engine dying cancels it
+    arm.tipX = arm.held.x; arm.tipY = arm.held.y;
+    arm.ox = arm.tipX - mount.x; arm.oy = arm.tipY - mount.y;
+    if (Math.hypot(arm.ox, arm.oy) > ARM_REACH || !engine.running) {
+      arm.held.state = 'free'; arm.held = null;
+    } else if ((arm.tie += dt) >= TIE_TIME) {
+      arm.held.state = 'rising'; arm.held = null; // balloon on, let go
+    }
+  } else if (mode === 'seated' && engine.running) {
+    // Claw points at the mouse, capped at ARM_REACH (broken arm only reaches half as far)
+    const m = mouseWorld(), dx = m.x - mount.x, dy = m.y - mount.y, d = Math.hypot(dx, dy) || 1;
+    const reach = Math.min(d, arm.broken ? ARM_REACH * 0.5 : ARM_REACH);
+    arm.ox = dx / d * reach; arm.oy = dy / d * reach;
+    arm.tipX = mount.x + arm.ox; arm.tipY = mount.y + arm.oy;
+    // Auto-grab: claw overlapping a free relic starts the tie
+    if (!arm.broken && !sub.dead) {
+      const h = RELIC_SIZE / 2 + CLAW_RADIUS;
+      const r = relics.find(r => r.state === 'free' && Math.abs(r.x - arm.tipX) < h && Math.abs(r.y - arm.tipY) < h);
+      if (r) { r.state = 'tying'; arm.held = r; arm.tie = 0; }
+    }
+  } else {
+    // Nobody at the controls: frozen in place if powered, otherwise it sags down and hangs limp
+    if (!engine.running) {
+      const k = 1 - Math.exp(-3 * dt);
+      arm.ox += (0 - arm.ox) * k; arm.oy += (ARM_REACH * 0.6 - arm.oy) * k;
+    }
+    arm.tipX = mount.x + arm.ox; arm.tipY = mount.y + arm.oy;
+  }
+  // Ballooned relics rise straight up through everything; bank coins at the top of the cave
+  for (const r of relics) {
+    if (r.state !== 'rising') continue;
+    r.y -= BALLOON_SPEED * dt;
+    if (r.y < -50) { r.state = 'gone'; coins += RELIC_VALUE; }
+  }
 }
 
 // ===================== SONAR =====================
 // Ray vs rectangle (slab method). Returns distance along ray or Infinity.
 function rayRect(ox, oy, dx, dy, r) {
-  let tmin = 0, tmax = SONAR_RANGE;
+  let tmin = 0, tmax = MURK_RADIUS;
   for (const [o, dd, lo, hi] of [[ox, dx, r.x, r.x + r.w], [oy, dy, r.y, r.y + r.h]]) {
     if (Math.abs(dd) < 1e-9) { if (o < lo || o > hi) return Infinity; continue; }
     let t1 = (lo - o) / dd, t2 = (hi - o) / dd;
@@ -141,49 +384,90 @@ function rayRect(ox, oy, dx, dy, r) {
   }
   return tmin;
 }
-function castRay(ang) {
+// Ray vs the creature's circle. Returns distance along ray or Infinity.
+function rayCreature(ox, oy, dx, dy) {
+  const fx = ox - CREATURE_X, fy = oy - CREATURE_Y, r = CREATURE_SIZE / 2;
+  const b = fx * dx + fy * dy, c = fx * fx + fy * fy - r * r, disc = b * b - c;
+  if (disc < 0) return Infinity;
+  const t = -b - Math.sqrt(disc);
+  return t >= 0 ? t : Infinity;
+}
+function castRay(o, ang) {
   const dx = Math.cos(ang), dy = Math.sin(ang);
   let best = Infinity;
-  for (const r of ROCKS) best = Math.min(best, rayRect(cube.x, cube.y, dx, dy, r));
-  return { dist: Math.min(best, SONAR_RANGE), hit: best <= SONAR_RANGE, dx, dy };
+  for (const r of ROCKS) best = Math.min(best, rayRect(o.x, o.y, dx, dy, r));
+  const tc = rayCreature(o.x, o.y, dx, dy);
+  const creature = tc < best; // creature is in front of any rock on this ray
+  best = Math.min(best, tc);
+  // Relics are small boxes; any not yet banked can be pinged
+  let tr = Infinity;
+  for (const r of relics) {
+    if (r.state === 'gone') continue;
+    const s = RELIC_SIZE;
+    tr = Math.min(tr, rayRect(o.x, o.y, dx, dy, { x: r.x - s / 2, y: r.y - s / 2, w: s, h: s }));
+  }
+  const relic = tr < best;
+  best = Math.min(best, tr);
+  return { dist: Math.min(best, MURK_RADIUS), hit: best <= MURK_RADIUS, creature: creature && !relic, relic, dx, dy };
 }
-// A ping is a cone of rays fired from where the cube was. Its wavefront grows at SOUND_SPEED.
+// A ping is a cone of rays fired from the emitter under the nose. Its wavefront grows at SOUND_SPEED.
 // The world is static, so each ray's hit distance is computed up front; the wave just "reveals" it over time.
-// When the wavefront reaches a hit, an echo spawns there and flies back to the cube (wherever it is now).
+// When the wavefront reaches a hit, an echo spawns there and flies back to the emitter (wherever it is now).
 // The dot only appears when the echo arrives, so far walls show up late and moving fast outruns your info.
 function firePing() {
-  const aim = Math.atan2(mouse.y + cam.y - cv.height / 2 - cube.y, mouse.x + cam.x - cv.width / 2 - cube.x);
+  const o = subPoint(EMITTER), m = mouseWorld();
+  const aim = Math.atan2(m.y - o.y, m.x - o.x);
   const rays = [], stepA = PING_SPREAD / (PING_RAYS - 1);
   const jitter = (Math.random() - 0.5) * stepA; // shift each ping a bit so repeats fill gaps
   for (let i = 0; i < PING_RAYS; i++) {
-    const r = castRay(aim - PING_SPREAD / 2 + stepA * i + jitter);
+    const r = castRay(o, aim - PING_SPREAD / 2 + stepA * i + jitter);
     rays.push({ ...r, echoed: !r.hit }); // misses never echo
   }
-  pings.push({ x: cube.x, y: cube.y, t: time, rays });
+  // Static: a few fake returns at random spots inside the cone, released when the wave gets there
+  const noise = [];
+  for (let i = 0; i < SONAR_NOISE; i++) {
+    const a = aim + (Math.random() - 0.5) * PING_SPREAD;
+    noise.push({ dx: Math.cos(a), dy: Math.sin(a), dist: Math.random() * MURK_RADIUS, echoed: false });
+  }
+  pings.push({ x: o.x, y: o.y, t: time, rays, noise });
+}
+
+// Turn a true hit into what the bad hardware reports: maybe nothing, otherwise a smeared, dimmer point.
+function spawnEcho(p, r) {
+  const f = r.dist / MURK_RADIUS;                      // 0 near, 1 at the murk edge
+  if (Math.random() < SONAR_DROPOUT * f) return;       // lost in the murk
+  const err = r.dist * SONAR_JITTER;
+  const hx = p.x + r.dx * r.dist + (Math.random() - 0.5) * 2 * err;
+  const hy = p.y + r.dy * r.dist + (Math.random() - 0.5) * 2 * err;
+  echoes.push({ x: hx, y: hy, hx, hy, creature: r.creature, relic: r.relic, bright: 1 - SONAR_DIST_FADE * f });
 }
 
 function updateSonar(dt) {
   pingTimer -= dt;
-  if (mouse.down && !cube.dead && pingTimer <= 0) { firePing(); pingTimer = PING_COOLDOWN; }
+  // Sonar is fired from the chair only
+  if (mouse.down && !sub.dead && mode === 'seated' && pingTimer <= 0) { firePing(); pingTimer = PING_COOLDOWN; }
 
   // Grow wavefronts, spawn echoes where they touch rock
   for (const p of pings) {
     const rad = (time - p.t) * SOUND_SPEED;
-    for (const r of p.rays) {
-      if (!r.echoed && rad >= r.dist) {
-        r.echoed = true;
-        const hx = p.x + r.dx * r.dist, hy = p.y + r.dy * r.dist;
-        echoes.push({ x: hx, y: hy, hx, hy });
-      }
+    for (const r of p.rays.concat(p.noise)) {
+      if (!r.echoed && rad >= r.dist) { r.echoed = true; spawnEcho(p, r); }
     }
   }
-  pings = pings.filter(p => (time - p.t) * SOUND_SPEED < SONAR_RANGE);
+  pings = pings.filter(p => (time - p.t) * SOUND_SPEED < MURK_RADIUS);
 
-  // Echoes home in on the cube; on arrival the hit point becomes a visible dot
+  // Echoes home in on the emitter; on arrival the hit point becomes a visible dot
+  const em = subPoint(EMITTER);
   for (const e of echoes) {
-    const dx = cube.x - e.x, dy = cube.y - e.y, d = Math.hypot(dx, dy);
+    const dx = em.x - e.x, dy = em.y - e.y, d = Math.hypot(dx, dy);
     const step = SOUND_SPEED * dt;
-    if (d <= Math.max(step, half)) { e.done = true; dots.push({ x: e.hx, y: e.hy, t: time }); }
+    if (d <= Math.max(step, 12)) {
+      e.done = true;
+      // Snap to the coarse display grid
+      dots.push({ x: Math.round(e.hx / SONAR_GRID) * SONAR_GRID, y: Math.round(e.hy / SONAR_GRID) * SONAR_GRID,
+                  t: time, creature: e.creature, relic: e.relic, bright: e.bright,
+                  fade: e.creature ? CREATURE_DOT_FADE : DOT_FADE_TIME });
+    }
     else { e.x += dx / d * step; e.y += dy / d * step; }
   }
   echoes = echoes.filter(e => !e.done);
@@ -193,63 +477,225 @@ function updateSonar(dt) {
 function draw() {
   const W = cv.width, H = cv.height;
   ctx.fillStyle = '#061a33'; ctx.fillRect(0, 0, W, H);
+  const e = zoomEase();
+  const dim = 1 - (1 - DIM_ZOOMED) * e; // outside world brightness
+  // Screen shake: decays over SHAKE_TIME, bigger when zoomed in
+  const sk = SHAKE_AMOUNT * (shake / SHAKE_TIME) * (1 + (SHAKE_ZOOMED_MULT - 1) * e);
   ctx.save();
-  ctx.translate(Math.round(W / 2 - cam.x), Math.round(H / 2 - cam.y));
+  ctx.translate(W / 2 + (Math.random() - 0.5) * 2 * sk, H / 2 + (Math.random() - 0.5) * 2 * sk);
+  ctx.scale(viewScale, viewScale);
+  ctx.translate(-cam.x, -cam.y);
 
-  // Sonar dots, fading with age
-  ctx.fillStyle = '#7ff';
+  // Sonar dots: chunky grid blocks, dimmer the further they came from, fading with age.
+  // Fresh dots bloom bigger for a moment, like phosphor lighting up. (rock = green, creature = orange-red, relic = yellow)
+  const g = SONAR_GRID;
   for (const p of dots) {
-    ctx.globalAlpha = 1 - (time - p.t) / DOT_FADE_TIME;
-    ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+    const age = time - p.t;
+    ctx.fillStyle = p.creature ? '#f63' : p.relic ? RELIC_COLOR : SONAR_COLOR;
+    ctx.globalAlpha = dim * p.bright * (1 - age / p.fade);
+    const s = age < 0.2 ? g * 1.6 : g - 1;
+    ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
   }
   ctx.globalAlpha = 1;
 
-  // Outgoing wavefronts: arc pieces between neighbouring rays that haven't hit rock yet
-  ctx.strokeStyle = '#7ff'; ctx.lineWidth = 1.5;
+  // Outgoing wavefronts: arc pieces between neighbouring rays that haven't hit rock yet.
+  // Random segments drop out each frame so the wave looks flickery and cheap.
+  ctx.strokeStyle = SONAR_COLOR; ctx.lineWidth = 1.5 / viewScale;
   for (const p of pings) {
     const rad = (time - p.t) * SOUND_SPEED;
-    ctx.globalAlpha = 0.6 * (1 - rad / SONAR_RANGE);
+    ctx.globalAlpha = dim * 0.6 * (1 - 0.5 * rad / MURK_RADIUS); // stays visible, then dies hard at the murk edge
     ctx.beginPath();
     for (let i = 0; i < p.rays.length - 1; i++) {
       const a = p.rays[i], b = p.rays[i + 1];
       if (rad > a.dist || rad > b.dist) continue; // this slice already hit something
+      if (Math.random() < SONAR_FLICKER) continue; // flicker
       ctx.moveTo(p.x + a.dx * rad, p.y + a.dy * rad);
       ctx.lineTo(p.x + b.dx * rad, p.y + b.dy * rad);
     }
     ctx.stroke();
   }
-  // Returning echoes: faint specks drifting back to the cube
-  ctx.globalAlpha = 0.45; ctx.fillStyle = '#bff';
-  for (const e of echoes) ctx.fillRect(e.x - 1, e.y - 1, 2, 2);
+  // Returning echoes: faint specks drifting back to the sub
+  ctx.globalAlpha = dim * 0.45; ctx.fillStyle = SONAR_COLOR;
+  for (const ec of echoes) ctx.fillRect(ec.x - 1, ec.y - 1, 2, 2);
+
+  // Ballooned relics are your own gear, so they're visible: relic box, string, balloon (dimmed with the outside)
+  ctx.globalAlpha = dim;
+  for (const r of relics) {
+    if (r.state !== 'rising') continue;
+    ctx.strokeStyle = RELIC_COLOR; ctx.lineWidth = 1.5;
+    ctx.strokeRect(r.x - RELIC_SIZE / 2, r.y - RELIC_SIZE / 2, RELIC_SIZE, RELIC_SIZE);
+    ctx.beginPath(); ctx.moveTo(r.x, r.y - RELIC_SIZE / 2); ctx.lineTo(r.x, r.y - 40); ctx.stroke();
+    ctx.fillStyle = '#e44'; ctx.beginPath(); ctx.arc(r.x, r.y - 52, 12, 0, Math.PI * 2); ctx.fill();
+  }
   ctx.globalAlpha = 1;
 
-  // Cube (blinks while immune)
-  const blink = cube.immune > 0 && Math.floor(time * 15) % 2 === 0;
-  if (!blink) {
-    ctx.save(); ctx.translate(cube.x, cube.y); ctx.rotate(cube.ang);
-    ctx.strokeStyle = cube.immune > 0 ? '#f66' : '#fff'; ctx.lineWidth = 2;
-    ctx.strokeRect(-half, -half, CUBE_SIZE, CUBE_SIZE);
-    ctx.restore();
+  // Arm: line from the mount under the nose to the claw. Broken = grey with a kink in it.
+  {
+    const mt = subPoint(ARM_MOUNT), bx = mt.x, by = mt.y;
+    const dx = arm.tipX - bx, dy = arm.tipY - by, d = Math.hypot(dx, dy) || 1;
+    const ux = dx / d, uy = dy / d;
+    ctx.strokeStyle = arm.broken ? '#777' : arm.held ? RELIC_COLOR : '#ccc'; ctx.lineWidth = 2 / viewScale;
+    ctx.beginPath(); ctx.moveTo(bx, by);
+    if (arm.broken) ctx.lineTo((bx + arm.tipX) / 2 - uy * 10, (by + arm.tipY) / 2 + ux * 10); // the bend
+    ctx.lineTo(arm.tipX, arm.tipY);
+    // Claw: two prongs, open normally, closed while holding
+    const open = arm.held ? 0.25 : 0.7, len = 8, a = Math.atan2(uy, ux);
+    for (const s of [-1, 1]) {
+      ctx.moveTo(arm.tipX, arm.tipY);
+      ctx.lineTo(arm.tipX + Math.cos(a + s * open) * len, arm.tipY + Math.sin(a + s * open) * len);
+    }
+    ctx.stroke();
+    // Tie progress ring around the claw
+    if (arm.held) {
+      ctx.beginPath(); ctx.arc(arm.tipX, arm.tipY, 13, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * arm.tie / TIE_TIME);
+      ctx.stroke();
+    }
   }
+
+  drawSub(e);
   ctx.restore();
 
   // Hull bar
   ctx.fillStyle = '#222'; ctx.fillRect(16, 16, 200, 14);
-  ctx.fillStyle = cube.hp > 60 ? '#4c8' : '#e44'; ctx.fillRect(16, 16, 200 * cube.hp / MAX_HP, 14);
+  ctx.fillStyle = sub.hp > 60 ? '#4c8' : '#e44'; ctx.fillRect(16, 16, 200 * sub.hp / MAX_HP, 14);
   ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.strokeRect(16.5, 16.5, 200, 14);
+
+  // Coins + arm status under the hull bar
+  ctx.font = '13px monospace'; ctx.textAlign = 'left';
+  ctx.fillStyle = RELIC_COLOR; ctx.fillText(`COINS ${coins}`, 16, 50);
+  ctx.fillStyle = arm.broken ? '#e44' : arm.hits > 0 ? '#fa3' : '#4c8';
+  ctx.fillText(arm.broken ? 'ARM BROKEN' : arm.hits > 0 ? 'ARM HIT' : 'ARM OK', 16, 68);
 
   // Debug readout
   ctx.font = '13px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = '#9cf';
-  ctx.fillText(`HP ${cube.hp}`, W - 16, 24);
-  ctx.fillText(`SPD ${Math.hypot(cube.vx, cube.vy).toFixed(0)} px/s`, W - 16, 42);
-  ctx.fillText(`DEPTH ${(cube.y / 10).toFixed(1)} m`, W - 16, 60);
+  ctx.fillText(`HP ${sub.hp}`, W - 16, 24);
+  ctx.fillText(`SPD ${Math.hypot(sub.vx, sub.vy).toFixed(0)} px/s`, W - 16, 42);
+  ctx.fillText(`DEPTH ${(sub.y / 10).toFixed(1)} m`, W - 16, 60);
+  ctx.fillText(`CREATURE ${(Math.hypot(sub.x - CREATURE_X, sub.y - CREATURE_Y) / 10).toFixed(1)} m`, W - 16, 78);
+  ctx.fillText(`MODE ${mode}`, W - 16, 96);
+  ctx.fillText(`FIG x ${fig.x.toFixed(1)}`, W - 16, 114);
 
-  if (cube.dead) {
+  // Mode, top center
+  ctx.textAlign = 'center'; ctx.font = 'bold 14px monospace';
+  ctx.fillStyle = mode === 'seated' ? '#9cf' : '#fc6';
+  ctx.fillText(mode === 'seated' ? 'SEATED' : 'STANDING', W / 2, 24);
+
+  // Tiny terminal readout in the corner while seated and zoomed out, so you can see it from the chair
+  if (e < 0.5) {
+    const lines = terminalLines();
+    ctx.globalAlpha = 1 - e * 2;
+    ctx.fillStyle = '#111'; ctx.fillRect(16, H - 22 - lines.length * 16, 150, 12 + lines.length * 16);
+    ctx.strokeStyle = '#555'; ctx.strokeRect(16.5, H - 21.5 - lines.length * 16, 150, 12 + lines.length * 16);
+    ctx.textAlign = 'left'; ctx.font = '12px monospace';
+    lines.forEach((l, i) => { ctx.fillStyle = l.c; ctx.fillText(l.t, 24, H - 12 - (lines.length - 1 - i) * 16); });
+    ctx.globalAlpha = 1;
+  }
+
+  if (sub.dead) {
     ctx.textAlign = 'center'; ctx.fillStyle = '#f44'; ctx.font = 'bold 48px monospace';
     ctx.fillText('HULL FAILED', W / 2, H / 2);
     ctx.font = '16px monospace'; ctx.fillStyle = '#fff';
     ctx.fillText('press R to restart', W / 2, H / 2 + 34);
   }
+}
+
+// What the engine terminal currently says: [{ t: text, c: color }]. Shared by the wall terminal and the corner readout.
+function terminalLines() {
+  if (term.reboot > 0) return [{ t: 'NO SIGNAL', c: '#666' }, { t: `REBOOT ${Math.ceil(term.reboot)}`, c: '#fa3' }];
+  if (engine.running) return [{ t: 'ENGINE OK', c: '#4c8' }];
+  if (engine.restart > 0) return [{ t: 'ENGINE STALLED', c: '#e44' },
+                                  { t: `RESTART ${Math.floor(100 * engine.restart / ENGINE_RESTART_TIME)}%`, c: '#fa3' }];
+  return [{ t: 'ENGINE STALLED', c: Math.floor(time * 3) % 2 ? '#e44' : '#822' }, { t: 'RESTART AT BAY', c: '#e44' }];
+}
+
+// Hull, propeller, emitter. Crossfades into a cutaway (see-through hull + interior) as we zoom in.
+function drawSub(e) {
+  const blink = sub.immune > 0 && Math.floor(time * 15) % 2 === 0; // flashes after a hit
+  ctx.save(); ctx.translate(sub.x, sub.y); ctx.rotate(visAng());
+  const lw = 2 / viewScale; // keep outlines the same thickness on screen at any zoom
+
+  // Propeller: shaft out the back, spinning X when the engine runs
+  ctx.strokeStyle = '#999'; ctx.lineWidth = lw;
+  ctx.beginPath(); ctx.moveTo(80, 0); ctx.lineTo(PROP_POS[0], PROP_POS[1]);
+  for (const a of [propAng, propAng + Math.PI / 2]) {
+    const c = Math.cos(a) * 8, s = Math.sin(a) * 8;
+    ctx.moveTo(PROP_POS[0] - c, PROP_POS[1] - s); ctx.lineTo(PROP_POS[0] + c, PROP_POS[1] + s);
+  }
+  ctx.stroke();
+
+  // Hull polygons: solid grey seated, mostly see-through when zoomed in
+  for (const poly of SUB_POLYS) {
+    ctx.beginPath(); poly.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath();
+    ctx.globalAlpha = 1 - 0.85 * e;
+    ctx.fillStyle = blink ? '#c66' : '#8a9099'; ctx.fill();
+    ctx.globalAlpha = 1;
+    // Dark outline on the solid hull, light outline in cutaway so it still reads against the water
+    ctx.strokeStyle = blink ? '#f66' : e > 0.5 ? '#9aa3ad' : '#22262c'; ctx.lineWidth = lw; ctx.stroke();
+  }
+  // Sonar screen window on the nose underside, emitter and arm mount nubs
+  ctx.fillStyle = '#163'; ctx.fillRect(-52, -20, 24, 3);
+  ctx.fillStyle = '#ccc';
+  ctx.fillRect(EMITTER[0] - 2, EMITTER[1], 4, 3);
+  ctx.beginPath(); ctx.arc(ARM_MOUNT[0], ARM_MOUNT[1] + 1, 2.5, 0, Math.PI * 2); ctx.fill();
+
+  if (e > 0.01) drawInterior(e);
+  ctx.restore();
+}
+
+// Cutaway interior, in sub-local px (already translated/rotated by drawSub; rotation is ~0 when zoomed in)
+function drawInterior(e) {
+  ctx.globalAlpha = e;
+  ctx.fillStyle = '#2b3138'; ctx.fillRect(3, -32, 74, 61);           // inside of the body
+  ctx.strokeStyle = '#555'; ctx.lineWidth = 0.6;
+  ctx.beginPath(); ctx.moveTo(3, FLOOR_Y); ctx.lineTo(77, FLOOR_Y); ctx.stroke(); // floor
+  ctx.textAlign = 'center';
+
+  // Terminal on the wall
+  ctx.fillStyle = '#111'; ctx.fillRect(TERMINAL_X - 15, -16, 30, 13);
+  ctx.strokeStyle = '#777'; ctx.strokeRect(TERMINAL_X - 15, -16, 30, 13);
+  ctx.font = '2.8px monospace';
+  terminalLines().forEach((l, i) => { ctx.fillStyle = l.c; ctx.fillText(l.t, TERMINAL_X, -10.5 + i * 4); });
+  ctx.font = '3px monospace';
+  ctx.fillStyle = '#999'; ctx.fillText('TERMINAL', TERMINAL_X, 0);
+
+  // Chair
+  ctx.fillStyle = '#6a5a48';
+  ctx.fillRect(CHAIR_X - 5, 19, 10, 2); ctx.fillRect(CHAIR_X + 4, 8, 2, 13); ctx.fillRect(CHAIR_X - 1, 21, 2, 8);
+  ctx.fillStyle = '#999'; ctx.fillText('CHAIR', CHAIR_X, 6);
+
+  // Engine bay door at the back, under the propeller shaft
+  ctx.fillStyle = engine.running ? '#3c4a3c' : '#4a3030'; ctx.fillRect(DOOR_X - 4, 5, 8, FLOOR_Y - 5);
+  ctx.strokeStyle = '#888'; ctx.strokeRect(DOOR_X - 4, 5, 8, FLOOR_Y - 5);
+  ctx.fillStyle = '#aaa'; ctx.fillRect(DOOR_X - 3, 16, 1.5, 3);
+  ctx.strokeStyle = '#666'; ctx.beginPath(); ctx.moveTo(DOOR_X - 4, 0); ctx.lineTo(80, 0); ctx.stroke(); // shaft
+  ctx.fillStyle = '#999'; ctx.fillText('ENGINE', DOOR_X - 2, -2);
+
+  // Stick figure: sitting in the chair, or standing at fig.x (walk cycle swings the legs)
+  ctx.strokeStyle = '#eee'; ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  if (mode === 'seated') {
+    const x = CHAIR_X + 1;
+    ctx.arc(x, 7, 2.2, 0, Math.PI * 2);
+    ctx.moveTo(x, 9.2); ctx.lineTo(x + 1, 18);          // torso
+    ctx.moveTo(x + 1, 18); ctx.lineTo(x - 5, 18); ctx.lineTo(x - 5, FLOOR_Y); // leg on the seat, shin down
+    ctx.moveTo(x, 12); ctx.lineTo(x - 5, 14);           // arms on the controls
+  } else {
+    const x = fig.x, sw = Math.sin(fig.walk * 12) * 3 * (fig.stun > 0 ? 0 : 1);
+    const lean = fig.stun > 0 ? Math.sign(fig.vx) * 3 : 0;  // tipping over while stumbling
+    ctx.arc(x + lean, FLOOR_Y - 18, 2.2, 0, Math.PI * 2);
+    ctx.moveTo(x + lean, FLOOR_Y - 15.8); ctx.lineTo(x, FLOOR_Y - 8);   // torso
+    ctx.moveTo(x, FLOOR_Y - 8); ctx.lineTo(x + sw, FLOOR_Y);             // legs
+    ctx.moveTo(x, FLOOR_Y - 8); ctx.lineTo(x - sw, FLOOR_Y);
+    ctx.moveTo(x - 3 + lean, FLOOR_Y - 10); ctx.lineTo(x + lean, FLOOR_Y - 14); ctx.lineTo(x + 3 + lean, FLOOR_Y - 10); // arms
+  }
+  ctx.stroke();
+
+  // Engine restart progress bar above the figure
+  if (engine.restart > 0) {
+    ctx.fillStyle = '#222'; ctx.fillRect(fig.x - 8, FLOOR_Y - 26, 16, 2.5);
+    ctx.fillStyle = '#fa3'; ctx.fillRect(fig.x - 8, FLOOR_Y - 26, 16 * engine.restart / ENGINE_RESTART_TIME, 2.5);
+  }
+  ctx.globalAlpha = 1;
 }
 
 // ===================== LOOP =====================
