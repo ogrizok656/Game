@@ -15,6 +15,14 @@ You are a lone captain in a small sub sent to loot Atlantis. Barotrauma's floodi
 Skeleton to show systems. One hardcoded level, one stationary creature, endless rising quota. Success = how long you stay alive and keep up with the quota.
 Cut for now: surface ship and launch, procedural levels, rescue call, shop menus, roaming creature AI, scan-triggered spawns, horn shockwave.
 
+## The level: the trench
+One fixed level, generated from a fixed seed (identical every run). About 550 m deep.
+- A wide mouth at the top with a floating boulder, narrowing into a jagged trench with overhanging ledges.
+- The throat (~335 m): the tightest part. The creature hugs its left wall with two bait relics floating beside it. You have to squeeze past it to go deeper.
+- Below the throat the trench opens into a huge cavern: Atlantis. A tower, a colonnade of broken columns, a stepped temple with a fallen roof and pediment, a jagged wall fragment, an arch, and a domed building.
+- Walls are organic polygons, ruins are straight-edged architecture. On sonar, ruins return pale bone-white so you can tell architecture from rock.
+- Loot: deeper = richer. 2 bait relics (125), 2 on ledges/boulders in the trench (75), 4 in the ruins (175), reshuffled every dive. Loot rests on real surfaces (temple steps, dome top, ledges). Scrap is spread along walls, ledges and the ruins.
+
 ## Core loop
 - Each dive starts with about 1 minute of free repairs.
 - Dive, ping with sonar, find relics, grab with arm, send up on balloons. Things break, fix/lock/restart.
@@ -29,7 +37,7 @@ Layout follows the second sketch (sub faces RIGHT): engine room top-left (back) 
 
 The crew room is deliberately cramped: you barely walk, but everything is slightly out of reach, so you shuffle.
 
-The stick figure: A/D walks (the left end climbs the diagonal wall), the mouse steers his hand (the inside version of the robot arm). Limited reach, only in front of him, he turns around to reach behind (a cap shows which way he faces). The hand can't pass through walls, only through the open bay door. Hold E to use what the hand touches, LMB to grab (wheel, crank, modules).
+The stick figure: A/D walks (the left end climbs the diagonal wall), the mouse steers his hand (the inside version of the robot arm). Limited reach, two facings only: he flips instantly to whichever side the mouse is on (a cap shows which way he faces). The hand can't pass through walls, only through the open bay door. Hold E to use what the hand touches, LMB to grab (wheel, crank, modules).
 
 Parts:
 - Propeller: outside, back. Thrust. Breaks, cannot be repaired. Only creatures break it, 3 bumps (warning stage).
@@ -43,9 +51,11 @@ Parts:
 - 4 red module slots (hatches): top, front corner, bottom (floor), leg.
 
 Hit rules:
-- Each part rolls once per impact, about 1 in 3 (storage 1 in 2). Hull is a health bar, not a roll.
+- Only ONE part on the side that hit rolls per impact. Chance scales with impact speed: 15% just over the threshold, up to 50% for a hard slam (storage x1.5). Hull is a health bar, not a roll.
+- Two stages: the first bad roll leaves the part DAMAGED (yellow "!", still works), the next breaks it. Repairs clear both.
 - Only hits above a speed threshold count. Slow nudges are free.
-- After a roll, that part gets 1 second of immunity (per part, not global).
+- After a roll, that part gets 1.5 seconds of immunity (per part, not global).
+- Measured: light scrapes break something after ~11 hits (about the hull's whole life), hard slams after 3-5.
 - Direction decides what breaks: diving lands on the bottom, sideways hits the nose (front) or back, climbing scrapes the fragile top.
 - Creature attack order: propeller, then engine, then control panel. Keep it from being fully scripted.
 
@@ -76,11 +86,13 @@ Control panel failure: everything freezes in its current state (systems, screens
 ## Sonar, creatures
 - Sonar is the only sense. Drains fuel, only way to find loot.
 - World invisible until a ping hits it. Dots fade (rock 6 s, creature 9 s). Limited range.
+- Look (Barotrauma-style): only the outer skin of walls shows, as soft additive glow blobs. The hardware's position error smears returns ALONG the surface, barely into it, so walls read as a thin wobbly outline. Fresh returns bloom cyan-green and cool to blue as they fade; repeatedly pinged walls burn in brighter. Dark teal glass with grain and scanlines, beige rim with tick marks.
 - Sonar module is directional: it can only aim within the arc its slot faces.
 - Demo creature: one, stationary, about 70x70, invisible until pinged. Contact: 30 damage, hard knockback, always an engine malfunction, bumps the propeller.
 
 ## Hatches, water, pump, modules
-- Modules: sonar, pump, air generator, horn (horn has no effect in the demo). Any module fits any slot; taking one out or putting one in cycles the hatch and traps one bucket of water (5%). Free while docked.
+- Horn: Q (or the terminal button) from the chair. Runs on 3 compressed-air charges (refilled at the dock), no power needed, but a frozen panel can't fire it. The blast goes out of whatever side the horn is mounted on, shoves a creature it catches away (it drifts back), and kicks the sub the other way. Charges can be vented into the cabin from storage for +30% air.
+- Modules: sonar, pump, air generator, horn. Any module fits any slot; taking one out or putting one in cycles the hatch and traps one bucket of water (5%). Free while docked.
 - Spare modules live in the orange storage: touch it and press E to open the inventory, click a module to take it in your hand, click a slot to install it (whatever was there swaps into your hand).
 - Air generator: works in any slot, needs power. Not installed or no power = air falls (60 s), the hand crank slows that.
 - Starting setup: AIR top, SONAR nose, PUMP floor, diagonal slot empty, HORN in storage.

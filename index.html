@@ -31,9 +31,13 @@ const BASE_SINK     = 10;    // px/s the sub settles down at with nothing aboard
 const MAX_HP        = 200;   // the carcass. 0 = implosion
 const HIT_DAMAGE    = 20;
 const HULL_IMMUNITY = 1.0;   // seconds between hull hits
-const PART_BREAK_CHANCE    = 1 / 3;
-const STORAGE_BREAK_CHANCE = 1 / 2;
-const PART_IMMUNITY = 1.0;   // per part, after it rolls
+// Parts break in two stages: a bad roll leaves a part DAMAGED (still works), the next one breaks it.
+// Only ONE part on the side that hit rolls per impact, and harder hits roll higher.
+const PART_CHANCE_SOFT    = 0.15; // roll chance for a hit just over HIT_SPEED
+const PART_CHANCE_HARD    = 0.5;  // ...for a slam at HARD_HIT_SPEED or faster
+const HARD_HIT_SPEED      = 400;
+const STORAGE_CHANCE_MULT = 1.5;  // storage is the most fragile
+const PART_IMMUNITY = 1.5;   // per part, after it rolls
 const PROP_BUMPS    = 3;     // creature bumps before the propeller dies
 const PROP_BUMP_CHANCE = 0.75; // a creature touch doesn't always land on the propeller
 // Engine, power, air
@@ -90,24 +94,39 @@ const PING_COOLDOWN = 0.7;
 const PING_SPREAD   = 0.9;   // radians, width of the ping cone
 const PING_RAYS     = 70;
 const SONAR_PORT_ARC= 1.3;   // radians each side of the slot's facing the cone can be aimed
-const SONAR_JITTER   = 0.07;
+const SONAR_JITTER   = 0.07;  // position error ALONG the wall surface, as a fraction of distance
+const SONAR_DEPTH_JITTER = 0.012; // error into/out of the wall: small, so you only see the wall's outer skin
 const SONAR_DROPOUT  = 0.55;
 const SONAR_DIST_FADE= 0.75;
-const SONAR_GRID     = 6;
+const SONAR_BLOB     = 11;    // px (world), glow radius of one return
 const SONAR_NOISE    = 3;
 const SONAR_FLICKER  = 0.3;
-const SONAR_COLOR    = '#5f9';
+const SONAR_COLOR    = '#7ef';  // wavefront / echo specks
+const MAX_DOTS       = 6000;
+const SONAR_BLOB_ALPHA = 0.5;
+const SONAR_NEAR_THIN  = 220;  // px: wall returns closer than this get thinned out (keeps blob spacing even at any range)  // per-return brightness; overlaps add up, so lower = less blown-out when you ping one spot a lot
 // Creature
-const CREATURE_X = 600, CREATURE_Y = 2520;
 const CREATURE_SIZE     = 70;
 const CREATURE_DAMAGE   = 30;
 const CREATURE_KNOCKBACK= 500;
 const CREATURE_DOT_FADE = 9.0;
+// Shockwave horn (module): compressed air charges, no power cost. Fire with Q (or the button) from the chair.
+const HORN_CHARGES    = 3;     // refilled at the dock
+const HORN_RANGE      = 260;   // px the shockwave travels
+const HORN_SPEED      = 700;   // px/s
+const HORN_ARC        = 1.0;   // radians each side of the slot's facing
+const HORN_PUSH       = 320;   // px/s the shockwave shoves a creature away
+const HORN_RECOIL     = 60;    // px/s kick on the sub, opposite the blast
+const CREATURE_RETURN = 20;    // px/s a shoved creature drifts back home
+const CHARGE_AIR      = 0.3;   // venting a charge into the cabin (from storage) gives this much air
 // Loot + robot arm
 const RELIC_SIZE     = 16;
-const RELIC_VALUE    = 125;
+const RELIC_VALUE    = 125;    // the two bait relics by the creature
+const RELIC_VALUE_UPPER = 75; // on ledges and boulders in the trench
+const RELIC_VALUE_RUINS = 175; // down in Atlantis: deeper = richer
 const RELIC_COLOR    = '#fd3';
-const RELICS_PER_DIVE= 8;      // two of them always next to the creature
+const UPPER_RELICS_PER_DIVE = 2; // + 2 bait by the creature
+const RUIN_RELICS_PER_DIVE  = 4;
 const ARM_REACH      = 90;
 const ARM_SLIDE_SPEED= 140;    // px/s the arm base runs along its rail
 const CLAW_RADIUS    = 6;
@@ -121,8 +140,8 @@ const SHAKE_CREATURE = 22;
 // Crew: the stick figure and his hand (interior px)
 const FIG_HEIGHT     = 50;     // feet to top of the head
 const HAND_REACH     = 38;     // shoulder to hand
-const HAND_BEHIND    = 4;      // how far behind his own shoulder he can reach (he has to turn around)
-const TURN_TIME      = 0.2;    // seconds to turn around
+const HAND_BEHIND    = 4;      // how far behind his own shoulder he can reach
+const FLIP_DEADZONE  = 3;      // mouse must be this far past his shoulder before he flips to face it
 const WALK_SPEED     = 30;
 const WALK_ACCEL     = 220;    // so he doesn't start/stop like a robot
 const STUMBLE_TIME   = 0.5;
@@ -135,24 +154,130 @@ const DIM_STANDING   = 0.3;
 const SUB_VIS_TILT   = 0.5;    // fraction of the physics wobble that's drawn
 const STAND_UP_TIME  = 0.5;
 
-// ===================== WORLD =====================
-const ROCKS = [
-  [-300, -300, 300, 4800], [1200, -300, 300, 4800],  // outer walls
-  [-300, -300, 1800, 250], [-300, 4200, 1800, 300],  // ceiling, floor
-  [0, 300, 350, 200], [850, 500, 350, 300],           // upper narrowing
-  [0, 900, 250, 500], [700, 1200, 500, 120],          // left bulge, right overhang shelf
-  [950, 1500, 250, 600], [550, 1650, 80, 80],         // right wall chunk, small boulder
-  [0, 1800, 450, 150], [500, 2000, 150, 100],         // left ledge, floating rock
-  [800, 2300, 400, 150], [0, 2600, 300, 400],         // right shelf, left bulge
-  [1000, 3000, 200, 500], [400, 3200, 250, 80],       // right wall, thin floating slab
-  [0, 3500, 200, 700], [900, 3800, 300, 120],         // bottom left wall, last overhang
-].map(([x, y, w, h]) => ({ x, y, w, h }));
-const DOCK_X = 600, DOCK_Y = 100;
-const RELIC_BAIT = [[490, 2545], [690, 2480]];
-const RELIC_POOL = [[780, 2150], [250, 2200], [900, 2750], [350, 3150], [700, 3700], [500, 4185],
-                    [600, 1500], [350, 1100], [1100, 2800], [150, 3300], [1050, 3700], [800, 4185]];
-const SCRAP_POOL = [[400, 700], [800, 1000], [300, 1600], [700, 1900], [1100, 2200], [200, 2500],
-                    [650, 3000], [850, 3350], [400, 3850], [1000, 4185]];
+// ===================== WORLD: THE TRENCH =====================
+// One fixed level. Built from a seeded random so it's identical every run (hand-shaped, just not hand-typed).
+// A wide mouth narrows into a tight throat where the creature waits, then opens into the Atlantis cavern.
+// Everything solid is a polygon: { pts, kind ('rock' | 'ruin'), bbox x0..x1 / y0..y1, segs (edges + tangents) }.
+let seed = 20261027;
+const srand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+const LEVEL_W = 2000, LEVEL_BOTTOM = 5900;
+const CAVERN_FLOOR = 5440;     // top of the Atlantis cavern floor
+const THROAT_Y = 3350;         // narrowest part, where the creature waits
+const trenchCenter = y => 1000 + 150 * Math.sin(y / 850) + 60 * Math.sin(y / 310 + 1);
+// Half width of open water at each depth, smoothly blended between these keys
+const WIDTH_KEYS = [[-400, 900], [300, 700], [1400, 400], [2400, 340], [3000, 320], [3600, 310], [4050, 450], [4500, 900], [LEVEL_BOTTOM, 950]];
+function trenchHalfWidth(y) {
+  for (let i = 1; i < WIDTH_KEYS.length; i++) {
+    const [y0, w0] = WIDTH_KEYS[i - 1], [y1, w1] = WIDTH_KEYS[i];
+    if (y <= y1) { const f = Math.max(0, Math.min(1, (y - y0) / (y1 - y0))), s = f * f * (3 - 2 * f); return w0 + (w1 - w0) * s; }
+  }
+  return WIDTH_KEYS[WIDTH_KEYS.length - 1][1];
+}
+// Jagged wall faces: smooth wander + random chips every WALL_STEP px
+const WALL_STEP = 45, wallL = [], wallR = [];
+for (let y = -400; y <= LEVEL_BOTTOM; y += WALL_STEP) {
+  const c = trenchCenter(y), hw = trenchHalfWidth(y), jag = () => (srand() - 0.5) * 44;
+  wallL.push([c - hw + 32 * Math.sin(y / 97) + 18 * Math.sin(y / 37 + 2) + jag(), y]);
+  wallR.push([c + hw + 32 * Math.sin(y / 113 + 1) + 18 * Math.sin(y / 43) + jag(), y]);
+}
+// x of a wall face at depth y (side -1 = left, 1 = right)
+function wallX(side, y) {
+  const a = side < 0 ? wallL : wallR, i = Math.max(0, Math.min(a.length - 2, Math.floor((y + 400) / WALL_STEP)));
+  return a[i][0] + (a[i + 1][0] - a[i][0]) * (y - a[i][1]) / WALL_STEP;
+}
+const SOLIDS = [];
+function addSolid(pts, kind = 'rock') {
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]), segs = [];
+  for (let i = 0; i < pts.length; i++) {
+    const [ax, ay] = pts[i], [bx, by] = pts[(i + 1) % pts.length], l = Math.hypot(bx - ax, by - ay) || 1;
+    segs.push({ ax, ay, bx, by, tx: (bx - ax) / l, ty: (by - ay) / l });
+  }
+  SOLIDS.push({ pts, kind, segs, x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) });
+}
+const box = (x, y, w, h, kind = 'ruin') => addSolid([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], kind);
+// The two walls (everything outside the faces is rock)
+addSolid([[-600, -400], ...wallL, [-600, LEVEL_BOTTOM]]);
+addSolid([[LEVEL_W + 600, -400], ...wallR, [LEVEL_W + 600, LEVEL_BOTTOM]]);
+// Cavern floor: bumpy, rising toward the walls like a bowl
+{
+  const pts = [];
+  for (let x = -100; x <= LEVEL_W + 200; x += 70) {
+    const edge = Math.max(0, Math.abs(x - trenchCenter(5400)) - 650);
+    pts.push([x, CAVERN_FLOOR + 28 * Math.sin(x / 130) + 14 * Math.sin(x / 47) + (srand() - 0.5) * 18 - edge * 0.45]);
+  }
+  addSolid([...pts, [LEVEL_W + 200, LEVEL_BOTTOM + 100], [-100, LEVEL_BOTTOM + 100]]);
+}
+// Overhanging ledges sticking out of a wall, sloping down. Returns a spot on top (for loot).
+function ledge(side, y, len) {
+  const wx = wallX(side, y), d = -side;
+  addSolid([[wx - d * 40, y - 25], [wx + d * len, y + 5], [wx + d * len * 0.7, y + 22], [wx + d * len * 0.3, y + 36], [wx - d * 40, y + 50]]);
+  return [wx + d * len * 0.5, y - 30];
+}
+// Lumpy floating boulders. Returns a spot on top.
+function boulder(x, y, r) {
+  const pts = [];
+  for (let i = 0; i < 14; i++) { const a = i / 14 * Math.PI * 2, rr = r * (0.75 + srand() * 0.4); pts.push([x + Math.cos(a) * rr, y + Math.sin(a) * rr * 0.8]); }
+  addSolid(pts);
+  return [x, y - r - 10];
+}
+const LEDGES = [ledge(-1, 800, 230), ledge(1, 1250, 200), ledge(-1, 1950, 150), ledge(1, 2600, 130), ledge(-1, 4250, 240), ledge(1, 4380, 220)];
+const BOULDERS = [boulder(trenchCenter(450) + 270, 450, 80), boulder(trenchCenter(1600) - 130, 1600, 60),
+                  boulder(trenchCenter(4800) + 420, 4800, 90), boulder(trenchCenter(4950) - 480, 4950, 70)];
+
+// ----- Atlantis: ruins on the cavern floor (kind 'ruin' = pale returns on sonar) -----
+const RX = Math.round(trenchCenter(5300)), F = CAVERN_FLOOR;
+// Stepped temple with columns, roof and pediment (one column snapped short)
+box(RX - 180, F - 60, 360, 140); box(RX - 140, F - 110, 280, 60); box(RX - 100, F - 155, 200, 50);
+for (const [cx, h] of [[RX - 85, 150], [RX - 40, 150], [RX + 22, 85], [RX + 67, 150]]) box(cx - 9, F - 155 - h, 18, h);
+box(RX - 105, F - 327, 125, 22); box(RX + 50, F - 327, 55, 22);             // roof slab, broken where the column fell
+addSolid([[RX - 110, F - 327], [RX - 20, F - 382], [RX + 20, F - 372], [RX - 10, F - 327]], 'ruin');  // pediment fragment
+// Colonnade on the left: broken columns, one slab still on top
+for (const [cx, h] of [[RX - 600, 230], [RX - 520, 230], [RX - 440, 150], [RX - 360, 200]]) box(cx - 11, F - h, 22, h + 40);
+box(RX - 612, F - 248, 112, 18);
+// Arch on the right: two pillars and a curved band (in convex chunks)
+box(RX + 340, F - 200, 40, 240); box(RX + 460, F - 200, 40, 240);
+for (let i = 0; i < 6; i++) {
+  const a0 = Math.PI + i / 6 * Math.PI, a1 = Math.PI + (i + 1) / 6 * Math.PI, c = [RX + 420, F - 200];
+  addSolid([[c[0] + Math.cos(a0) * 80, c[1] + Math.sin(a0) * 80], [c[0] + Math.cos(a1) * 80, c[1] + Math.sin(a1) * 80],
+            [c[0] + Math.cos(a1) * 40, c[1] + Math.sin(a1) * 40], [c[0] + Math.cos(a0) * 40, c[1] + Math.sin(a0) * 40]], 'ruin');
+}
+// Domed building, far right
+box(RX + 580, F - 140, 220, 180);
+{ const pts = []; for (let i = 0; i <= 16; i++) { const a = Math.PI + i / 16 * Math.PI; pts.push([RX + 690 + Math.cos(a) * 105, F - 140 + Math.sin(a) * 105]); } addSolid(pts, 'ruin'); }
+// Tower with crenellations, far left
+box(RX - 800, F - 420, 80, 460);
+for (let i = 0; i < 3; i++) box(RX - 800 + i * 31, F - 445, 18, 26);
+// Fallen column and a jagged wall fragment
+{
+  const c = [RX - 240, F - 18], a = 0.18, hl = 85, hw = 12, ca = Math.cos(a), sa = Math.sin(a);
+  addSolid([[-hl, -hw], [hl, -hw], [hl, hw], [-hl, hw]].map(([x, y]) => [c[0] + x * ca - y * sa, c[1] + x * sa + y * ca]), 'ruin');
+}
+addSolid([[RX + 200, F + 40], [RX + 200, F - 80], [RX + 230, F - 100], [RX + 260, F - 70], [RX + 290, F - 115], [RX + 310, F - 60], [RX + 310, F + 40]], 'ruin');
+
+// ----- Placing things -----
+function solidAt(x, y) {
+  for (const s of SOLIDS) if (x > s.x0 && x < s.x1 && y > s.y0 && y < s.y1 && inPoly({ x, y }, s.pts)) return true;
+  return false;
+}
+// Drop a loot spot onto whatever surface is below it (rising out first if it starts inside something)
+function settle([x, y], half) {
+  for (let i = 0; i < 200 && solidAt(x, y + half); i++) y -= 4;
+  for (let d = 0; d < 500; d += 2) if (solidAt(x, y + half + d + 1)) return [x, y + d];
+  return [x, y];
+}
+const DOCK_X = Math.round(trenchCenter(100)), DOCK_Y = 100;
+// The creature hugs the left wall of the throat: you have to squeeze past it to reach Atlantis
+let CREATURE_HOME = [wallX(-1, THROAT_Y) + 75, THROAT_Y];
+while ([0, 1, 2, 3, 4, 5, 6, 7].some(i => solidAt(CREATURE_HOME[0] + Math.cos(i * Math.PI / 4) * 40, CREATURE_HOME[1] + Math.sin(i * Math.PI / 4) * 40))) CREATURE_HOME[0] += 5;
+// Loot. Deeper = richer: ruins relics are worth the most.
+const RELIC_BAIT = [[CREATURE_HOME[0] + 95, THROAT_Y - 70], [CREATURE_HOME[0] + 40, THROAT_Y + 105]];   // floating by the creature
+const RELIC_UPPER = [...LEDGES.slice(0, 4), ...BOULDERS.slice(0, 2)].map(p => settle(p, RELIC_SIZE / 2));
+const RELIC_RUINS = [[RX - 20, F - 200], [RX - 160, F - 130], [RX - 560, F - 100], [RX + 420, F - 60], [RX + 690, F - 300],
+                     [RX - 760, F - 480], [RX - 240, F - 80], [RX + 255, F - 160], [RX + 860, F - 80], [RX - 900, F - 60]]
+                     .map(p => settle(p, RELIC_SIZE / 2));
+const SCRAP_POOL = [...LEDGES.slice(4).map(p => settle(p, SCRAP_SIZE / 2)), ...BOULDERS.slice(2).map(p => settle(p, SCRAP_SIZE / 2)),
+                    [wallX(-1, 1100) + 45, 1100], [wallX(1, 2200) - 45, 2200], [wallX(-1, 2900) + 45, 2900], [wallX(1, 3900) - 45, 3900],
+                    ...[[RX - 450, F - 50], [RX + 120, F - 40], [RX + 560, F - 40], [RX - 700, F - 40]].map(p => settle(p, SCRAP_SIZE / 2))];
 
 // ===================== SUB LAYOUT =====================
 // Traced from the sketch. Sub-local px, origin = sub position, front (nose) is RIGHT. About 240x102.
@@ -203,6 +328,7 @@ let relics, scraps, arm, coins, paid, quota, divesDone, quotasMet, phase, dockT,
 let engine, gen, sys, air, fuel, water, pendingWater, spare, parts, modules, hatch, crank, grip, carry, inv, hold;
 let mode, standT, fig, hand, shake, shakeAmp, shakeBias, propAng, zoomT, throttle, frozenThrottle, darkT;
 let failReason, pumpSpark, snapshot, termButtons = [], invButtons = [];
+let creature, hornCharges, hornWaves;
 let viewScale = 1;
 let logLines = [];
 
@@ -227,8 +353,10 @@ function reset() {
     { id: 'AIR',   slot: 0, broken: false, imm: 0, carried: false },
     { id: 'SONAR', slot: 1, broken: false, imm: 0, carried: false },
     { id: 'PUMP',  slot: FLOOR_SLOT, broken: false, imm: 0, carried: false },
-    { id: 'HORN',  slot: -1, broken: false, imm: 0, carried: false }, // no effect in the demo
+    { id: 'HORN',  slot: -1, broken: false, imm: 0, carried: false },
   ];
+  creature = { x: CREATURE_HOME[0], y: CREATURE_HOME[1], vx: 0, vy: 0 };
+  hornCharges = HORN_CHARGES; hornWaves = [];
   arm = { u: railLength() * 0.55, tipX: DOCK_X, tipY: DOCK_Y, ox: 0, oy: 40, held: null, tie: 0, hits: 0, broken: false };
   hatch = { progress: 0 };                 // engine bay door: 0 sealed, 1 open
   crank = { lastT: -9, ang: 0 };
@@ -237,7 +365,7 @@ function reset() {
   inv = { open: false };                   // storage inventory window
   hold = { id: null, t: 0, lock: false };
   mode = 'seated'; standT = 0; zoomT = 0;
-  fig = { x: 30, vx: 0, face: 1, turn: 0, stun: 0, walk: 0 };
+  fig = { x: 30, vx: 0, face: 1, stun: 0, walk: 0 };
   hand = { x: 50, y: 0 };
   shake = 0; shakeAmp = 0; shakeBias = 0; propAng = 0; darkT = 0; pumpSpark = 0;
   throttle = { x: 0, y: 0 }; frozenThrottle = null; snapshot = null;
@@ -367,7 +495,12 @@ function startDock(first) {
   water = 0; pendingWater = 0; air = 1;
   if (fuel > 0) { engine.state = 'running'; engine.report = null; engine.stopIn = 0; }
   gen.on = true; gen.boot = 0; arm.hits = 0;
-  relics = RELIC_BAIT.concat(shuffle(RELIC_POOL).slice(0, RELICS_PER_DIVE - 2)).map(([x, y]) => ({ x, y, state: 'free' }));
+  hornCharges = HORN_CHARGES; hornWaves = [];
+  creature.x = CREATURE_HOME[0]; creature.y = CREATURE_HOME[1]; creature.vx = creature.vy = 0;
+  // Fresh loot every dive: the bait by the creature, a couple in the trench, most of it in the ruins
+  const pick = (list, n, value) => shuffle(list).slice(0, n).map(([x, y]) => ({ x, y, value, state: 'free' }));
+  relics = [...pick(RELIC_BAIT, 2, RELIC_VALUE), ...pick(RELIC_UPPER, UPPER_RELICS_PER_DIVE, RELIC_VALUE_UPPER),
+            ...pick(RELIC_RUINS, RUIN_RELICS_PER_DIVE, RELIC_VALUE_RUINS)];
   scraps = shuffle(SCRAP_POOL).slice(0, SCRAP_PER_DIVE).map(([x, y]) => ({ x, y, state: 'free' }));
   dots = []; pings = []; echoes = [];
   log(first ? 'DOCKED. FREE REPAIRS 60s' : `DIVE ${divesDone} DONE. FREE REPAIRS 60s`, 'good');
@@ -467,27 +600,28 @@ function armHit() {
     if (arm.held) { arm.held.state = 'free'; arm.held = null; }
   }
 }
-// Roll the parts on the side that hit. Each candidate rolls once, then is immune for a second.
-function rollParts(side) {
-  const cand = {
+// A part on the hull side that hit: 'slotN' = whatever module sits in slot N
+const partRef = id => id.startsWith('slot') ? moduleIn(+id[4]) : parts[id];
+const PART_NAMES = { panel: 'CONTROL PANEL', storage: 'STORAGE', pumpMech: 'PUMP MECHANISM' };
+// One part on the side that hit rolls (not all of them), chance scaling with impact speed.
+// First bad roll = DAMAGED (still works, warning), second = BROKEN.
+function rollParts(side, speed) {
+  const cand = ({
     bottom: ['pumpMech', 'slot3'],
     top:    ['storage', 'slot0'],
     front:  ['panel', 'slot1'],
     back:   ['slot2'],
-  }[side] || [];
-  for (const id of cand) {
-    if (id.startsWith('slot')) {
-      const m = moduleIn(+id[4]);
-      if (!m || m.broken || m.imm > 0) continue;
-      m.imm = PART_IMMUNITY;
-      if (Math.random() < PART_BREAK_CHANCE) { m.broken = true; log(`${m.id} MODULE BROKEN`, 'bad'); }
-      continue;
-    }
-    const p = parts[id];
-    if (p.broken || p.dead || p.imm > 0) continue;
-    p.imm = PART_IMMUNITY;
-    if (Math.random() < (id === 'storage' ? STORAGE_BREAK_CHANCE : PART_BREAK_CHANCE)) breakPart(id);
-  }
+  }[side] || []).filter(id => { const p = partRef(id); return p && !p.broken && !p.dead && p.imm <= 0; });
+  if (!cand.length) return;
+  const id = cand[Math.floor(Math.random() * cand.length)], p = partRef(id);
+  p.imm = PART_IMMUNITY;
+  const f = clamp((speed - HIT_SPEED) / (HARD_HIT_SPEED - HIT_SPEED), 0, 1);
+  const chance = (PART_CHANCE_SOFT + (PART_CHANCE_HARD - PART_CHANCE_SOFT) * f) * (id === 'storage' ? STORAGE_CHANCE_MULT : 1);
+  if (Math.random() >= chance) return;
+  const name = id.startsWith('slot') ? p.id + ' MODULE' : PART_NAMES[id];
+  if (!p.worn) { p.worn = true; log(`${name} DAMAGED - NEXT HIT BREAKS IT`, 'warn'); }
+  else if (id.startsWith('slot')) { p.broken = true; log(`${name} BROKEN`, 'bad'); }
+  else breakPart(id);
 }
 function breakPart(id) {
   parts[id].broken = true;
@@ -503,7 +637,7 @@ function breakPart(id) {
   else if (id === 'propeller') log('PROPELLER DESTROYED', 'bad');
 }
 // Rock impact: dull thud, small shake
-function rockHit(side, dirX) {
+function rockHit(side, dirX, speed) {
   kick(SHAKE_WALL, 0); thud(); stumble(dirX);
   if (arm.held) { if (sub.hullImm <= 0) { sub.hullImm = HULL_IMMUNITY; armHit(); } return; }
   if (sub.hullImm <= 0) {
@@ -511,7 +645,7 @@ function rockHit(side, dirX) {
     damageHull(HIT_DAMAGE);
     if (Math.random() < PREVENTION_CHANCE) engineShutdown('prevention');
   }
-  rollParts(side);
+  rollParts(side, speed);
 }
 // Creature contact: big shake from the engine side. Always breaks the engine; works through propeller -> engine -> panel.
 function creatureHit(dirX) {
@@ -542,6 +676,7 @@ addEventListener('keydown', e => {
     if (e.code === 'KeyH') buyHull();
     if (e.code === 'KeyP') payQuota();
     if (mode === 'seated' && ['Digit1', 'Digit2', 'Digit3'].includes(e.code)) toggleSystem(['sonar', 'pump', 'lights'][+e.code[5] - 1]);
+    if (e.code === 'KeyQ') fireHorn();
     if (e.code === 'KeyR' && sub.dead) reset();
   }
   keys[e.code] = true;
@@ -555,11 +690,12 @@ cv.addEventListener('mousedown', e => {
   if (e.button !== 0) return;
   if (mode === 'seated') {
     const b = termButtons.find(b => mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h);
-    if (b) { toggleSystem(b.id); return; }
+    if (b) { if (b.id === 'horn') fireHorn(); else toggleSystem(b.id); return; }
   }
-  // Storage inventory: click a module to take it in your hand
+  // Storage inventory: click a module to take it in your hand, or vent a horn charge for air
   if (inv.open) {
     const b = invButtons.find(b => mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h);
+    if (b && b.vent) { ventCharge(); return; }
     if (b) { carry = b.m; carry.carried = true; log(`TOOK ${carry.id}`, 'good'); }
     inv.open = false; return;
   }
@@ -601,16 +737,17 @@ function handValid(p) {
 }
 function updateHand(dt) {
   const s = shoulder(), m = toLocal(mouseWorld());
-  // Face the mouse; turning around takes TURN_TIME
-  const want = m.x >= fig.x ? 1 : -1;
-  if (fig.turn > 0) { if ((fig.turn -= dt) <= 0) { fig.turn = 0; fig.face = -fig.face; } }
-  else if (want !== fig.face && fig.stun <= 0 && !grip) fig.turn = TURN_TIME;
+  // Two facings, flips instantly to the mouse's side (small deadzone so he doesn't jitter when it's right above him)
+  if (fig.stun <= 0 && !grip) {
+    if (m.x > s.x + FLIP_DEADZONE) fig.face = 1;
+    else if (m.x < s.x - FLIP_DEADZONE) fig.face = -1;
+  }
   // Desired hand spot: toward the mouse, within reach, not behind him
   let dx = m.x - s.x, dy = m.y - s.y;
   const d = Math.hypot(dx, dy) || 1;
   if (d > HAND_REACH) { dx *= HAND_REACH / d; dy *= HAND_REACH / d; }
   if (dx * fig.face < -HAND_BEHIND) dx = -HAND_BEHIND * fig.face;
-  if (fig.turn > 0 || fig.stun > 0) { dx = fig.face * 6; dy = 10; }      // arm drops while turning/stumbling
+  if (fig.stun > 0) { dx = fig.face * 6; dy = 10; }      // arm drops while stumbling
   // Walk out from the shoulder until something blocks it
   let tx = s.x, ty = s.y;
   for (let i = 1; i <= 16; i++) {
@@ -623,7 +760,7 @@ function updateHand(dt) {
 }
 // What the hand is on. { id, hint, hold (s) / click / grip, can }
 function handTarget() {
-  if (mode !== 'standing' || fig.stun > 0 || fig.turn > 0 || inv.open) return null;
+  if (mode !== 'standing' || fig.stun > 0 || inv.open) return null;
   const h = hand, docked = phase === 'dock';
   const repair = (id, name) => (!docked && spare <= 0) ? { id, hint: `${name}: NO SPARE PARTS`, can: false }
     : { id, hint: `HOLD E: REPAIR ${name}${docked ? ' (FREE)' : ' (1 PART)'}`, hold: docked ? DOCK_REPAIR_TIME : REPAIR_TIME, can: true };
@@ -647,16 +784,21 @@ function handTarget() {
   if (si >= 0) {
     const m = moduleIn(si);
     if (!m) return { id: 'slot', hint: `${SLOTS[si].name} SLOT EMPTY`, can: false };
-    const r = m.broken ? repair('slot' + si, m.id) : null;
+    const r = m.broken || m.worn ? repair('slot' + si, m.id) : null;
     return { id: 'slot' + si, slot: si, click: true, can: true, hold: r && r.can ? r.hold : 0,
       hint: (r ? r.hint + '   ' : '') + `CLICK: TAKE ${m.id} OUT` };
   }
-  if (inPoly(h, STORAGE_POLY) || inRect(h, [46, -36, 59, 14])) return parts.storage.broken ? repair('storage', 'STORAGE') : { id: 'storage', hint: 'E: OPEN STORAGE', can: true };
+  if (inPoly(h, STORAGE_POLY) || inRect(h, [46, -36, 59, 14])) {
+    // Broken storage won't open; damaged storage still opens (click) and can be patched (hold E)
+    if (parts.storage.broken) return repair('storage', 'STORAGE');
+    const r = parts.storage.worn ? repair('storage', 'STORAGE') : null;
+    return { id: 'storage', click: true, can: true, hold: r && r.can ? r.hold : 0, hint: (r ? r.hint + '   ' : '') + 'CLICK: OPEN STORAGE' };
+  }
   if (inRect(h, PUMP_BOX, 4)) {
     if (parts.pumpMech.dead) return { id: 'pumpMech', hint: 'PUMP EXPLODED - GONE', can: false };
-    if (parts.pumpMech.broken) return repair('pumpMech', 'PUMP');
+    if (parts.pumpMech.broken || parts.pumpMech.worn) return repair('pumpMech', 'PUMP');
   }
-  if (inPoly(h, PANEL_POLY) && parts.panel.broken) {
+  if (inPoly(h, PANEL_POLY) && (parts.panel.broken || parts.panel.worn)) {
     if (power() || gen.boot > 0) return { id: 'panel', hint: 'PANEL LIVE - CUT POWER (BREAKER IN THE ENGINE BAY)', can: false };
     return repair('panel', 'PANEL');
   }
@@ -667,10 +809,11 @@ function holdAction(id) {
   if (id === 'engine') { engine.state = 'running'; engine.report = null; log('ENGINE RESTARTED', 'good'); tone(660, 0.08); tone(990, 0.12, 0.1); return; }
   if (id === 'breaker') { gen.on = !gen.on; if (gen.on) gen.boot = BOOT_TIME; else log('POWER CUT', 'warn'); tone(120, 0.2, 0, 'square', 0.08); return; }
   if (!docked) spare--;
-  if (id === 'panel') { parts.panel.broken = false; frozenThrottle = null; snapshot = null; log('PANEL REPAIRED', 'good'); }
-  else if (id === 'pumpMech') { parts.pumpMech.broken = false; log('PUMP REPAIRED', 'good'); }
-  else if (id === 'storage') { parts.storage.broken = false; log('STORAGE REPAIRED', 'good'); }
-  else if (id.startsWith('slot')) { const m = moduleIn(+id[4]); m.broken = false; log(`${m.id} REPAIRED`, 'good'); }
+  // Repairs clear both stages (damaged and broken)
+  if (id === 'panel') { parts.panel.broken = parts.panel.worn = false; frozenThrottle = null; snapshot = null; log('PANEL REPAIRED', 'good'); }
+  else if (id === 'pumpMech') { parts.pumpMech.broken = parts.pumpMech.worn = false; log('PUMP REPAIRED', 'good'); }
+  else if (id === 'storage') { parts.storage.broken = parts.storage.worn = false; log('STORAGE REPAIRED', 'good'); }
+  else if (id.startsWith('slot')) { const m = moduleIn(+id[4]); m.broken = m.worn = false; log(`${m.id} REPAIRED`, 'good'); }
 }
 // Clicks: take a module out of a slot, put one in (swapping), or store it. Every hatch cycle traps a bucket of water.
 function clickAction(t) {
@@ -681,16 +824,15 @@ function clickAction(t) {
     carry = null; bucket();
     if (other) { other.slot = -1; other.carried = true; carry = other; }
   } else if (t.id === 'store') { carry.slot = -1; carry.carried = false; log(`${carry.id} STORED`, 'good'); carry = null; }
+  else if (t.id === 'storage') { inv.open = true; mouse.down = false; }
   else if (t.id.startsWith('slot')) {
     const m = moduleIn(t.slot);
     m.slot = -1; m.carried = true; carry = m; bucket(); log(`TOOK ${m.id} OUT`, 'warn');
   }
 }
+// E while the storage window is open closes it
 function tapE() {
-  if (sub.dead || mode !== 'standing') return;
-  if (inv.open) { inv.open = false; return; }
-  const t = handTarget();
-  if (t && t.id === 'storage' && t.can && !t.hold) { inv.open = true; hold.lock = true; }
+  if (inv.open) { inv.open = false; hold.lock = true; }
 }
 function updateHold(dt) {
   const t = keys.KeyE && !hold.lock ? handTarget() : null;
@@ -722,7 +864,7 @@ function updateFigure(dt) {
   const wade = waterLineLocal() < footY(fig.x) - 15 ? 0.55 : 1;   // water above the knees slows you
   if (fig.stun > 0) { fig.stun -= dt; fig.vx *= Math.exp(-4 * dt); }
   else {
-    const tv = h * WALK_SPEED * wade * (h && h !== fig.face ? 0.6 : 1);  // backing up is slower
+    const tv = h * WALK_SPEED * wade;
     fig.vx += clamp(tv - fig.vx, -WALK_ACCEL * dt, WALK_ACCEL * dt);
   }
   fig.x += fig.vx * dt; fig.walk += Math.abs(fig.vx) / WALK_SPEED * dt;
@@ -731,32 +873,65 @@ function updateFigure(dt) {
 }
 
 // ===================== PHYSICS =====================
-const boxHit = (a, r) => a.x + a.w > r.x && a.x < r.x + r.w && a.y + a.h > r.y && a.y < r.y + r.h;
-function collideAxis(axis) {
-  const v = axis === 'x' ? 'vx' : 'vy', pos = axis, size = axis === 'x' ? 'w' : 'h';
-  let push = 0;
-  for (const b of subBoxes()) for (const r of ROCKS) {
-    if (!boxHit(b, r)) continue;
-    const p = sub[v] > 0 ? r[pos] - (b[pos] + b[size]) : r[pos] + r[size] - b[pos];
-    if (Math.abs(p) > Math.abs(push)) push = p;
+// ----- Collision against the level's polygons -----
+// Do segments ab and cd cross?
+function segCross(ax, ay, bx, by, cx, cy, dx, dy) {
+  const o = (px, py, qx, qy, rx, ry) => (qx - px) * (ry - py) - (qy - py) * (rx - px);
+  const d1 = o(cx, cy, dx, dy, ax, ay), d2 = o(cx, cy, dx, dy, bx, by), d3 = o(ax, ay, bx, by, cx, cy), d4 = o(ax, ay, bx, by, dx, dy);
+  return d1 * d2 < 0 && d3 * d4 < 0;
+}
+// Does box b overlap solid polygon s? (vertex inside box, box corner inside polygon, or edges crossing)
+function boxHitsSolid(b, s) {
+  if (b.x + b.w < s.x0 || b.x > s.x1 || b.y + b.h < s.y0 || b.y > s.y1) return false;
+  const bx1 = b.x + b.w, by1 = b.y + b.h;
+  for (const [x, y] of s.pts) if (x > b.x && x < bx1 && y > b.y && y < by1) return true;
+  for (const [x, y] of [[b.x, b.y], [bx1, b.y], [bx1, by1], [b.x, by1]]) if (inPoly({ x, y }, s.pts)) return true;
+  for (const g of s.segs) {
+    if (Math.max(g.ax, g.bx) < b.x || Math.min(g.ax, g.bx) > bx1 || Math.max(g.ay, g.by) < b.y || Math.min(g.ay, g.by) > by1) continue;
+    if (segCross(g.ax, g.ay, g.bx, g.by, b.x, b.y, bx1, b.y) || segCross(g.ax, g.ay, g.bx, g.by, bx1, b.y, bx1, by1) ||
+        segCross(g.ax, g.ay, g.bx, g.by, bx1, by1, b.x, by1) || segCross(g.ax, g.ay, g.bx, g.by, b.x, by1, b.x, b.y)) return true;
   }
-  if (!push) return;
+  return false;
+}
+const subHitsSolid = () => subBoxes().some(b => SOLIDS.some(s => boxHitsSolid(b, s)));
+// If the hull ever ends up inside rock, pop it out to the nearest free spot (searching outward in rings)
+function unstick() {
+  if (!subHitsSolid()) return;
+  const x0 = sub.x, y0 = sub.y;
+  for (let r = 4; r <= 160; r += 4) for (let i = 0; i < 16; i++) {
+    const a = i / 16 * Math.PI * 2;
+    sub.x = x0 + Math.cos(a) * r; sub.y = y0 + Math.sin(a) * r;
+    if (!subHitsSolid()) { sub.vx = sub.vy = 0; return; }
+  }
+  sub.x = x0; sub.y = y0;
+}
+// Move along one axis. If that would put the hull into rock, binary-search back to the contact point,
+// then bounce and (if fast enough) take the hit.
+function moveAxis(axis, delta) {
+  if (!delta) return;
+  const v = axis === 'x' ? 'vx' : 'vy', start = sub[axis];
+  sub[axis] = start + delta;
+  if (!subHitsSolid()) return;
+  sub[axis] = start;
+  if (subHitsSolid()) { unstick(); return; }   // already wedged: pop out instead of phasing through
+  let lo = 0, hi = 1;
+  for (let i = 0; i < 8; i++) { const m = (lo + hi) / 2; sub[axis] = start + delta * m; if (subHitsSolid()) hi = m; else lo = m; }
+  sub[axis] = start + delta * lo;
   const speed = Math.abs(sub[v]), dir = Math.sign(sub[v]);
-  sub[pos] += push;
   sub[v] = -sub[v] * BOUNCE;
   sub.angV += (Math.random() - 0.5) * speed * 0.03;
   // Direction decides what breaks: diving lands on the bottom, sideways hits nose or back, climbing scrapes the top
   const side = axis === 'x' ? (dir > 0 ? 'front' : 'back') : (dir > 0 ? 'bottom' : 'top');
-  if (speed > HIT_SPEED) rockHit(side, axis === 'x' ? dir : 0);
+  if (speed > HIT_SPEED) rockHit(side, axis === 'x' ? dir : 0, speed);
 }
 function touchCreature() {
   const cr = CREATURE_SIZE / 2;
   const touching = subBoxes().some(b => {
-    const px = Math.max(b.x, Math.min(CREATURE_X, b.x + b.w)), py = Math.max(b.y, Math.min(CREATURE_Y, b.y + b.h));
-    return Math.hypot(px - CREATURE_X, py - CREATURE_Y) < cr;
+    const px = Math.max(b.x, Math.min(creature.x, b.x + b.w)), py = Math.max(b.y, Math.min(creature.y, b.y + b.h));
+    return Math.hypot(px - creature.x, py - creature.y) < cr;
   });
   if (!touching) return;
-  let dx = sub.x - CREATURE_X, dy = sub.y - CREATURE_Y;
+  let dx = sub.x - creature.x, dy = sub.y - creature.y;
   const d = Math.hypot(dx, dy);
   if (d === 0) { dx = 0; dy = -1; } else { dx /= d; dy /= d; }
   sub.vx = dx * CREATURE_KNOCKBACK; sub.vy = dy * CREATURE_KNOCKBACK;
@@ -784,8 +959,8 @@ function updateSub(dt) {
     sub.vy += (throttle.y * THRUST / mass() + (BASE_SINK + spare * PART_SINK) * DRAG) * dt;
     const d = Math.exp(-DRAG * dt);
     sub.vx *= d; sub.vy *= d;
-    sub.x += sub.vx * dt; collideAxis('x');
-    sub.y += sub.vy * dt; collideAxis('y');
+    moveAxis('x', sub.vx * dt);
+    moveAxis('y', sub.vy * dt);
     touchCreature();
     maxDepth = Math.max(maxDepth, sub.y);
     if (sub.y < DIVE_RETURN_Y && maxDepth > DIVE_MIN_DEPTH && !sub.dead) endDive();
@@ -841,11 +1016,65 @@ function updateArm(dt) {
   arm.tipX = base.x + arm.ox; arm.tipY = base.y + arm.oy;
   updateBalloons(dt);
 }
+// ===================== SHOCKWAVE HORN =====================
+// Fired from the chair (Q or the terminal button). Needs the horn module in a slot and a working panel,
+// but no power: it runs on compressed air charges. The blast goes out of whichever side the horn is mounted,
+// shoves any creature it catches away, and kicks the sub the other way.
+const slotFacing = i => Math.atan2(SLOTS[i].face[1], SLOTS[i].face[0]) + visAng();
+function fireHorn() {
+  const h = mod('HORN');
+  if (sub.dead || mode !== 'seated' || !panelOk() || phase !== 'dive') return;
+  if (h.slot < 0 || h.carried) return log('NO HORN MODULE INSTALLED', 'warn');
+  if (h.broken) return log('HORN MODULE BROKEN', 'bad');
+  if (hornCharges <= 0) return log('HORN: NO CHARGES LEFT', 'bad');
+  hornCharges--;
+  const o = subPoint(SLOTS[h.slot].c), a = slotFacing(h.slot);
+  // Did the cone catch the creature? It gets shoved when the wave reaches it.
+  const dx = creature.x - o.x, dy = creature.y - o.y, d = Math.hypot(dx, dy) || 1;
+  const off = Math.abs(Math.atan2(Math.sin(Math.atan2(dy, dx) - a), Math.cos(Math.atan2(dy, dx) - a)));
+  const hit = d < HORN_RANGE + CREATURE_SIZE / 2 && off < HORN_ARC ? { dx: dx / d, dy: dy / d, d: Math.max(0, d - CREATURE_SIZE / 2) } : null;
+  hornWaves.push({ x: o.x, y: o.y, a, t: time, hit });
+  sub.vx -= Math.cos(a) * HORN_RECOIL; sub.vy -= Math.sin(a) * HORN_RECOIL;
+  kick(SHAKE_WALL, 0); tone(55, 0.6, 0, 'sawtooth', 0.15); tone(110, 0.3, 0, 'square', 0.06);
+  log(`HORN FIRED (${hornCharges} LEFT)`, 'warn');
+}
+function updateHorn(dt) {
+  for (const w of hornWaves) {
+    if (w.hit && (time - w.t) * HORN_SPEED >= w.hit.d) { creature.vx += w.hit.dx * HORN_PUSH; creature.vy += w.hit.dy * HORN_PUSH; w.hit = null; }
+  }
+  hornWaves = hornWaves.filter(w => (time - w.t) * HORN_SPEED < HORN_RANGE);
+  // Shoved creature slides to a stop, then creeps back home
+  const px = creature.x, py = creature.y;
+  creature.x += creature.vx * dt; creature.y += creature.vy * dt;
+  const d = Math.exp(-2 * dt); creature.vx *= d; creature.vy *= d;
+  if (Math.hypot(creature.vx, creature.vy) < 15) {
+    const hx = CREATURE_HOME[0] - creature.x, hy = CREATURE_HOME[1] - creature.y, hd = Math.hypot(hx, hy);
+    if (hd > 1) { const s = Math.min(hd, CREATURE_RETURN * dt); creature.x += hx / hd * s; creature.y += hy / hd * s; }
+  }
+  if (solidAt(creature.x, creature.y)) { creature.x = px; creature.y = py; creature.vx = creature.vy = 0; } // shoved into rock: stops
+}
+// Draw shockwaves as expanding orange arcs (S = world -> drawing coords, k = scale)
+function drawHornWaves(S, k) {
+  ctx.strokeStyle = '#fa4'; ctx.lineWidth = 3 * Math.max(k, 0.5);
+  for (const w of hornWaves) {
+    const r = (time - w.t) * HORN_SPEED, [x, y] = S(w.x, w.y);
+    ctx.globalAlpha = 1 - r / HORN_RANGE;
+    ctx.beginPath(); ctx.arc(x, y, r * k, w.a - HORN_ARC, w.a + HORN_ARC); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+// Burn a horn charge as emergency oxygen (from the storage window)
+function ventCharge() {
+  if (hornCharges <= 0 || air >= 1) return;
+  hornCharges--; air = Math.min(1, air + CHARGE_AIR);
+  tone(300, 0.5, 0, 'triangle', 0.05); log(`VENTED A CHARGE: +${Math.round(CHARGE_AIR * 100)}% AIR`, 'good');
+}
+
 function updateBalloons(dt) {
   for (const r of relics) {
     if (r.state !== 'rising') continue;
     r.y -= BALLOON_SPEED * dt;
-    if (r.y < -50) { r.state = 'gone'; coins += RELIC_VALUE; log(`RELIC SOLD +${RELIC_VALUE}`, 'good'); }
+    if (r.y < -50) { r.state = 'gone'; coins += r.value; log(`RELIC SOLD +${r.value}`, 'good'); }
   }
 }
 
@@ -861,8 +1090,15 @@ function rayRect(ox, oy, dx, dy, r) {
   }
   return tmin;
 }
+// Ray vs one polygon edge. Returns distance along the ray or Infinity.
+function raySeg(ox, oy, dx, dy, g) {
+  const ex = g.bx - g.ax, ey = g.by - g.ay, den = dx * ey - dy * ex;
+  if (Math.abs(den) < 1e-9) return Infinity;
+  const fx = g.ax - ox, fy = g.ay - oy, t = (fx * ey - fy * ex) / den, u = (fx * dy - fy * dx) / den;
+  return t >= 0 && u >= 0 && u <= 1 ? t : Infinity;
+}
 function rayCreature(ox, oy, dx, dy) {
-  const fx = ox - CREATURE_X, fy = oy - CREATURE_Y, r = CREATURE_SIZE / 2;
+  const fx = ox - creature.x, fy = oy - creature.y, r = CREATURE_SIZE / 2;
   const b = fx * dx + fy * dy, c = fx * fx + fy * fy - r * r, disc = b * b - c;
   if (disc < 0) return Infinity;
   const t = -b - Math.sqrt(disc);
@@ -870,8 +1106,12 @@ function rayCreature(ox, oy, dx, dy) {
 }
 function castRay(o, ang) {
   const dx = Math.cos(ang), dy = Math.sin(ang);
-  let best = Infinity, kind = 'rock';
-  for (const r of ROCKS) best = Math.min(best, rayRect(o.x, o.y, dx, dy, r));
+  // Level: nearest polygon edge (the edge's own direction is the surface tangent)
+  let best = Infinity, kind = 'rock', seg = null;
+  for (const s of SOLIDS) {
+    if (o.x < s.x0 - MURK_RADIUS || o.x > s.x1 + MURK_RADIUS || o.y < s.y0 - MURK_RADIUS || o.y > s.y1 + MURK_RADIUS) continue;
+    for (const g of s.segs) { const t = raySeg(o.x, o.y, dx, dy, g); if (t < best) { best = t; seg = g; kind = s.kind; } }
+  }
   const tc = rayCreature(o.x, o.y, dx, dy);
   if (tc < best) { best = tc; kind = 'creature'; }
   const boxes = (list, s, k) => {
@@ -882,7 +1122,16 @@ function castRay(o, ang) {
     }
   };
   boxes(relics, RELIC_SIZE, 'relic'); boxes(scraps, SCRAP_SIZE, 'scrap');
-  return { dist: Math.min(best, MURK_RADIUS), hit: best <= MURK_RADIUS, kind, dx, dy };
+  // Surface direction at the hit (tangent), so the sonar's error smears along the wall, not into it
+  let tx = -dy, ty = dx;
+  if (best <= MURK_RADIUS) {
+    const px = o.x + dx * best, py = o.y + dy * best;
+    if ((kind === 'rock' || kind === 'ruin') && seg) { tx = seg.tx; ty = seg.ty; }
+    else if (kind === 'creature') {
+      const nx = px - creature.x, ny = py - creature.y, l = Math.hypot(nx, ny) || 1; tx = -ny / l; ty = nx / l;
+    }
+  }
+  return { dist: Math.min(best, MURK_RADIUS), hit: best <= MURK_RADIUS, kind, dx, dy, tx, ty };
 }
 // The sonar can only aim inside its slot's arc: where you mount it decides what you can see
 function sonarAim() {
@@ -908,12 +1157,18 @@ function firePing() {
   }
   pings.push({ x: o.x, y: o.y, t: time, rays, noise });
 }
+// Bad hardware smears each return ALONG the surface it hit (big error) and barely into it (tiny error),
+// so walls read as a thin, wobbly outline instead of a filled band.
 function spawnEcho(p, r) {
   const f = r.dist / MURK_RADIUS;
   if (Math.random() < SONAR_DROPOUT * f) return;
-  const err = r.dist * SONAR_JITTER;
-  const hx = p.x + r.dx * r.dist + (Math.random() - 0.5) * 2 * err;
-  const hy = p.y + r.dy * r.dist + (Math.random() - 0.5) * 2 * err;
+  // Up close, neighbouring rays land almost on top of each other: thin them so near walls stay blobby, not solid
+  if ((r.kind === 'rock' || r.kind === 'ruin') && Math.random() > r.dist / SONAR_NEAR_THIN) return;
+  const along = (Math.random() - 0.5) * 2 * r.dist * SONAR_JITTER;
+  const depth = (Math.random() - 0.5) * 2 * r.dist * SONAR_DEPTH_JITTER;
+  const tx = r.tx ?? -r.dy, ty = r.ty ?? r.dx;
+  const hx = p.x + r.dx * (r.dist + depth) + tx * along;
+  const hy = p.y + r.dy * (r.dist + depth) + ty * along;
   echoes.push({ x: hx, y: hy, hx, hy, kind: r.kind, bright: 1 - SONAR_DIST_FADE * f });
 }
 function updateSonar(dt) {
@@ -929,12 +1184,13 @@ function updateSonar(dt) {
     const dx = em.x - e.x, dy = em.y - e.y, d = Math.hypot(dx, dy), step = SOUND_SPEED * dt;
     if (d <= Math.max(step, 12)) {
       e.done = true;
-      dots.push({ x: Math.round(e.hx / SONAR_GRID) * SONAR_GRID, y: Math.round(e.hy / SONAR_GRID) * SONAR_GRID,
-                  t: time, kind: e.kind, bright: e.bright, fade: e.kind === 'creature' ? CREATURE_DOT_FADE : DOT_FADE_TIME });
+      dots.push({ x: e.hx, y: e.hy, t: time, kind: e.kind, bright: e.bright, size: 0.7 + Math.random() * 0.6,
+                  fade: e.kind === 'creature' ? CREATURE_DOT_FADE : DOT_FADE_TIME });
     } else { e.x += dx / d * step; e.y += dy / d * step; }
   }
   echoes = echoes.filter(e => !e.done);
   dots = dots.filter(p => time - p.t < p.fade);
+  if (dots.length > MAX_DOTS) dots.splice(0, dots.length - MAX_DOTS);
 }
 
 // ===================== UPDATE =====================
@@ -952,6 +1208,7 @@ function update(dt) {
   updateHold(dt);
   updateSub(dt);
   updateArm(dt);
+  updateHorn(dt);
   const zt = mode === 'seated' ? 0 : 1;
   zoomT += Math.sign(zt - zoomT) * Math.min(Math.abs(zt - zoomT), dt / ZOOM_TIME);
   const zs = Math.min(ZOOM_STANDING, cv.width * 0.85 / 250, cv.height * 0.75 / 115);
@@ -969,6 +1226,8 @@ function brokenX([x, y, w, h]) {
   ctx.strokeStyle = '#f33'; ctx.lineWidth = 0.8;
   ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + w, y + h); ctx.moveTo(x + w, y); ctx.lineTo(x, y + h); ctx.stroke();
 }
+// Yellow '!' on a part that's damaged but still working
+function wornMark(x, y) { ctx.font = 'bold 7px monospace'; ctx.fillStyle = '#fd3'; ctx.fillText('!', x, y); ctx.font = '4px monospace'; }
 function label(t, x, y, c = '#ccd') { ctx.fillStyle = c; ctx.fillText(t, x, y); }
 const redLight = () => !power() && darkT < RED_LIGHT_TIME && Math.floor(time * 2.5) % 2 === 0;
 function darkness() {
@@ -1016,12 +1275,12 @@ function drawSub() {
   drawWheel(false);
   // Storage (orange), panel (green), pump (blue)
   poly(STORAGE_POLY); ctx.fillStyle = parts.storage.broken ? '#7a4a10' : '#ff8a00'; ctx.fill(); ctx.strokeStyle = '#000'; ctx.stroke();
-  label(`STORAGE  ${spare}/${MAX_PARTS} parts`, 80, -29, '#222'); if (parts.storage.broken) brokenX([58, -36, 44, 11]);
+  label(`STORAGE  ${spare}/${MAX_PARTS} parts`, 80, -29, '#222'); if (parts.storage.broken) brokenX([58, -36, 44, 11]); else if (parts.storage.worn) wornMark(103, -28);
   poly(PANEL_POLY); ctx.fillStyle = parts.panel.broken ? '#2a5a2a' : '#4cc23a'; ctx.fill(); ctx.strokeStyle = '#000'; ctx.stroke();
   rect([97, -20, 6, 8], power() && panelOk() ? '#062' : '#111'); rect([98, -8, 7, 8], terminalAlive() ? '#062' : '#111');
-  label('PANEL', 95, 30, '#123'); if (parts.panel.broken) brokenX([83, 16, 24, 25]);
+  label('PANEL', 95, 30, '#123'); if (parts.panel.broken) brokenX([83, 16, 24, 25]); else if (parts.panel.worn) wornMark(88, 22);
   rect(PUMP_BOX, parts.pumpMech.dead ? '#111' : parts.pumpMech.broken ? '#202848' : '#26306e', '#000'); label('PUMP', 16.5, 47.5, '#aac');
-  if (parts.pumpMech.broken || parts.pumpMech.dead) brokenX(PUMP_BOX);
+  if (parts.pumpMech.broken || parts.pumpMech.dead) brokenX(PUMP_BOX); else if (parts.pumpMech.worn) wornMark(3, 46);
   if (pumpSpark > 0) for (let i = 0; i < 6; i++) rect([6 + Math.random() * 20, 40 + Math.random() * 8, 1.5, 1.5], '#ff5');
   // Air crank on the back wall
   ctx.save(); ctx.translate(...CRANK_POS); ctx.rotate(crank.ang);
@@ -1037,8 +1296,8 @@ function drawSub() {
       const w = Math.min(s.w, s.h) > 12 ? s.w - 6 : s.w - 2, h = Math.min(s.h - 2, 9);
       ctx.rotate(s.h > s.w ? -Math.PI / 2 : 0);
       const ww = s.h > s.w ? s.h - 6 : w;
-      rect([-ww / 2, -h / 2, ww, h], MODULE_COLORS[m.id], m.broken ? '#f33' : '#9fc');
-      label(m.id, 0, 1.4, m.broken ? '#f66' : '#dfe');
+      rect([-ww / 2, -h / 2, ww, h], MODULE_COLORS[m.id], m.broken ? '#f33' : m.worn ? '#fd3' : '#9fc');
+      label(m.id + (m.worn && !m.broken ? '!' : ''), 0, 1.4, m.broken ? '#f66' : m.worn ? '#fd3' : '#dfe');
     }
     ctx.restore();
   });
@@ -1086,7 +1345,7 @@ function drawFigure() {
     ctx.beginPath(); ctx.arc(hx - 1, hy - 21, 4.6, 0, Math.PI * 2); ctx.fill();
     drawCap(hx - 1, hy - 21, 1);
   } else {
-    const x = fig.x, fy = footY(x), f = fig.turn > 0 ? 0 : fig.face;
+    const x = fig.x, fy = footY(x), f = fig.face;
     const sw = Math.sin(fig.walk * 10) * 5 * Math.min(1, Math.abs(fig.vx) / 15);
     const lean = fig.stun > 0 ? Math.sign(fig.vx) * 4 : 0;
     const hipY = fy - 20, neckY = fy - FIG_HEIGHT + 11;
@@ -1160,37 +1419,102 @@ function drawBalloons(S, k) {
 function staticNoise(x, y, w, h) {
   for (let i = 0; i < 160; i++) { ctx.fillStyle = `rgba(200,200,200,${Math.random() * 0.5})`; ctx.fillRect(x + Math.random() * w, y + Math.random() * h, 3, 2); }
 }
-const DOT_COLORS = { rock: SONAR_COLOR, creature: '#f63', relic: RELIC_COLOR, scrap: '#cde' };
+// ----- Sonar look (Barotrauma-style): soft additive glow blobs that cool from cyan-green to blue as they age -----
+// Color ramps per return type: [fresh, middle, old]
+const DOT_RAMP = {
+  rock:     [[170, 255, 210], [60, 200, 255], [30, 70, 220]],
+  creature: [[255, 170, 110], [240, 70, 40], [140, 20, 40]],
+  relic:    [[255, 245, 160], [255, 200, 50], [170, 100, 10]],
+  scrap:    [[240, 245, 255], [160, 180, 230], [80, 90, 150]],
+  ruin:     [[235, 210, 150], [150, 200, 190], [60, 100, 140]],   // architecture: pale bone-white, so it reads apart from rock
+};
+const RAMP_STEPS = 10;
+const blobCache = {};
+// Pre-rendered soft round glow for a kind, age step and pixel size (cached at exact size so drawing it is a plain copy)
+function blobSprite(kind, step, px) {
+  const key = kind + step + '_' + px;
+  if (blobCache[key]) return blobCache[key];
+  const f = step / (RAMP_STEPS - 1), ramp = DOT_RAMP[kind];
+  const [a, b] = f < 0.5 ? [ramp[0], ramp[1]] : [ramp[1], ramp[2]], u = f < 0.5 ? f * 2 : (f - 0.5) * 2;
+  const c = a.map((v, i) => Math.round(v + (b[i] - v) * u));
+  const cv2 = document.createElement('canvas'); cv2.width = cv2.height = px;
+  const h = px / 2, g = cv2.getContext('2d'), gr = g.createRadialGradient(h, h, 0, h, h, h);
+  gr.addColorStop(0, `rgba(${c},1)`); gr.addColorStop(0.3, `rgba(${c},0.55)`); gr.addColorStop(1, `rgba(${c},0)`);
+  g.fillStyle = gr; g.fillRect(0, 0, px, px);
+  return blobCache[key] = cv2;
+}
+// Screen texture: fine grain + faint scanlines, cached per screen size
+let screenTex = null;
+function screenTexture(R) {
+  if (screenTex && screenTex.R === R) return screenTex.c;
+  const c = document.createElement('canvas'), n = Math.ceil(2 * R); c.width = c.height = n;
+  const g = c.getContext('2d'), img = g.createImageData(n, n);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const y = Math.floor(i / 4 / n), v = Math.random() * 40 + (y % 3 === 0 ? 18 : 0);
+    img.data[i] = v * 0.6; img.data[i + 1] = v; img.data[i + 2] = v * 0.9; img.data[i + 3] = 40;
+  }
+  g.putImageData(img, 0, 0);
+  screenTex = { R, c };
+  return c;
+}
+// Offscreen buffer the sonar returns are drawn into (recreated when the screen size changes)
+let glowBuf = null;
+const GLOW_RES = 0.5;
+function glowBuffer(R) {
+  const n = Math.ceil(2 * R * GLOW_RES);
+  if (!glowBuf || glowBuf.width !== n) { glowBuf = document.createElement('canvas'); glowBuf.width = glowBuf.height = n; }
+  return glowBuf;
+}
 function drawSonarScreen(L) {
   const { cx, cy, R } = L, k = R / MURK_RADIUS;
   const S = (x, y) => [cx + (x - sub.x) * k, cy + (y - sub.y) * k];
-  ctx.fillStyle = '#26292e'; ctx.beginPath(); ctx.arc(cx, cy, R + 16, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = '#4a4f57'; ctx.lineWidth = 2; ctx.stroke();
+  // Bezel
+  ctx.fillStyle = '#121615'; ctx.beginPath(); ctx.arc(cx, cy, R + 18, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#2c3330'; ctx.lineWidth = 3; ctx.stroke();
   ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
-  ctx.fillStyle = '#010c06'; ctx.fillRect(cx - R, cy - R, 2 * R, 2 * R);
+  // Glass: dark teal-brown, a bit lighter in the middle
+  const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
+  bg.addColorStop(0, '#16221d'); bg.addColorStop(0.7, '#0c1512'); bg.addColorStop(1, '#060a09');
+  ctx.fillStyle = bg; ctx.fillRect(cx - R, cy - R, 2 * R, 2 * R);
   ctx.textAlign = 'center'; ctx.font = 'bold 16px monospace';
   const s = mod('SONAR');
   if (!power()) { ctx.fillStyle = gen.boot > 0 ? '#5a5' : '#411'; ctx.fillText(gen.boot > 0 ? 'BOOTING...' : 'NO POWER', cx, cy); }
   else {
-    ctx.strokeStyle = '#0c3a20'; ctx.lineWidth = 1; ctx.beginPath();
+    ctx.drawImage(screenTexture(R), cx - R, cy - R);
+    // Faint range rings
+    ctx.strokeStyle = 'rgba(150,200,180,0.07)'; ctx.lineWidth = 1; ctx.beginPath();
     for (const f of [1 / 3, 2 / 3]) { ctx.moveTo(cx + R * f, cy); ctx.arc(cx, cy, R * f, 0, Math.PI * 2); }
-    ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R); ctx.stroke();
+    ctx.stroke();
+    // Where the sonar can aim from its slot, and where it's aimed
     if (installed('SONAR')) {
       const { o, faceA, aim } = sonarAim(), [ox, oy] = S(o.x, o.y);
-      ctx.fillStyle = 'rgba(80,255,150,0.06)';
+      ctx.fillStyle = 'rgba(120,220,255,0.035)';
       ctx.beginPath(); ctx.moveTo(ox, oy); ctx.arc(ox, oy, R * 2, faceA - SONAR_PORT_ARC - PING_SPREAD / 2, faceA + SONAR_PORT_ARC + PING_SPREAD / 2); ctx.fill();
-      ctx.strokeStyle = 'rgba(80,255,150,0.25)'; ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox + Math.cos(aim) * R * 2, oy + Math.sin(aim) * R * 2); ctx.stroke();
+      ctx.strokeStyle = 'rgba(220,205,170,0.35)'; ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox + Math.cos(aim) * R * 2, oy + Math.sin(aim) * R * 2); ctx.stroke();
     }
-    const g = Math.max(2, SONAR_GRID * k);
+    // Returns: additive glow blobs. Overlaps get brighter, so repeatedly pinged walls burn in.
+    // Drawn into an unclipped buffer first (per-draw clipping is slow), then copied onto the round screen once.
+    const buf = glowBuffer(R), g = buf.getContext('2d');
+    g.globalCompositeOperation = 'source-over'; g.clearRect(0, 0, buf.width, buf.height);
+    g.globalCompositeOperation = 'lighter';
+    // (half resolution: the glow is soft anyway, and it's 4x fewer pixels to clear and copy)
+    const hs = GLOW_RES, base = SONAR_BLOB * k * 2 * hs, ox0 = cx - R, oy0 = cy - R;
     for (const p of dots) {
-      const age = time - p.t, [x, y] = S(p.x, p.y), sz = age < 0.2 ? g * 1.6 : g;
-      ctx.fillStyle = DOT_COLORS[p.kind]; ctx.globalAlpha = p.bright * (1 - age / p.fade);
-      ctx.fillRect(x - sz / 2, y - sz / 2, sz, sz);
+      const age = time - p.t, f = age / p.fade, [x, y] = S(p.x, p.y);
+      if (x < ox0 - 20 || y < oy0 - 20 || x > ox0 + 2 * R + 20 || y > oy0 + 2 * R + 20) continue;
+      const step = Math.min(RAMP_STEPS - 1, Math.floor(f * RAMP_STEPS));
+      const sz = Math.max(2, Math.round(base * p.size * (age < 0.25 ? 1.5 - age * 2 : 1) / 2) * 2);   // fresh returns bloom
+      g.globalAlpha = p.bright * Math.pow(1 - f, 0.8) * SONAR_BLOB_ALPHA;
+      g.drawImage(blobSprite(p.kind, step, sz), Math.round((x - ox0) * hs - sz / 2), Math.round((y - oy0) * hs - sz / 2));
     }
-    ctx.strokeStyle = SONAR_COLOR; ctx.lineWidth = 1.5;
+    g.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(buf, ox0, oy0, 2 * R, 2 * R);
+    // Outgoing wavefront (flickery) and returning echo specks
+    ctx.strokeStyle = SONAR_COLOR; ctx.lineWidth = 1;
     for (const p of pings) {
       const rad = (time - p.t) * SOUND_SPEED;
-      ctx.globalAlpha = 0.7 * (1 - 0.5 * rad / MURK_RADIUS);
+      ctx.globalAlpha = 0.35 * (1 - 0.5 * rad / MURK_RADIUS);
       ctx.beginPath();
       for (let i = 0; i < p.rays.length - 1; i++) {
         const a = p.rays[i], b = p.rays[i + 1];
@@ -1199,22 +1523,37 @@ function drawSonarScreen(L) {
       }
       ctx.stroke();
     }
-    ctx.globalAlpha = 0.5; ctx.fillStyle = SONAR_COLOR;
+    ctx.globalAlpha = 0.35; ctx.fillStyle = SONAR_COLOR;
     for (const ec of echoes) { const [x, y] = S(ec.x, ec.y); ctx.fillRect(x - 1, y - 1, 2, 2); }
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = '#3c9'; ctx.lineWidth = 1;
+    // Faint static
+    for (let i = 0; i < 18; i++) { ctx.globalAlpha = Math.random() * 0.25; ctx.fillStyle = '#4af'; ctx.fillRect(cx - R + Math.random() * 2 * R, cy - R + Math.random() * 2 * R, 2, 2); }
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+    // Own sub: thin pale outline, like the reference
+    ctx.strokeStyle = 'rgba(225,230,220,0.75)'; ctx.lineWidth = 1.2;
     ctx.beginPath(); HULL_OUTLINE.forEach((p, i) => { const w = subPoint(p), [x, y] = S(w.x, w.y); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.closePath(); ctx.stroke();
-    drawArm(S, k, 1.5); drawBalloons(S, k);
+    drawArm(S, k, 1.5); drawBalloons(S, k); drawHornWaves(S, k);
     ctx.fillStyle = '#e44';
     if (!sys.sonar) ctx.fillText('SONAR SWITCHED OFF  [1]', cx, cy - R * 0.55);
     else if (s.slot < 0 || s.carried) ctx.fillText('NO SONAR MODULE INSTALLED', cx, cy - R * 0.55);
     else if (s.broken) ctx.fillText('SONAR MODULE BROKEN', cx, cy - R * 0.55);
     if (phase === 'dock') { ctx.fillStyle = '#9cf'; ctx.fillText('DOCKED', cx, cy + R * 0.6); }
-    for (let i = 0; i < 25; i++) { ctx.fillStyle = 'rgba(80,255,150,0.15)'; ctx.fillRect(cx - R + Math.random() * 2 * R, cy - R + Math.random() * 2 * R, 2, 2); }
+    // Glass vignette
+    const vg = ctx.createRadialGradient(cx, cy, R * 0.75, cx, cy, R);
+    vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.55)');
+    ctx.fillStyle = vg; ctx.fillRect(cx - R, cy - R, 2 * R, 2 * R);
   }
   ctx.restore();
+  // Beige rim with tick marks
+  ctx.strokeStyle = 'rgba(215,200,165,0.8)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = 'rgba(215,200,165,0.45)'; ctx.lineWidth = 1; ctx.beginPath();
+  for (let i = 0; i < 72; i++) {
+    const a = i * Math.PI / 36, l = i % 6 ? 6 : 12;
+    ctx.moveTo(cx + Math.cos(a) * (R - 2), cy + Math.sin(a) * (R - 2)); ctx.lineTo(cx + Math.cos(a) * (R - 2 - l), cy + Math.sin(a) * (R - 2 - l));
+  }
+  ctx.stroke();
   ctx.fillStyle = '#9ab'; ctx.font = '12px monospace'; ctx.textAlign = 'center';
-  ctx.fillText('WASD: STEER   LMB: PING   HOLD E: ARM   F: STAND', cx, cy + R + 34);
+  ctx.fillText('WASD: STEER   LMB: PING   HOLD E: ARM   Q: HORN   F: STAND', cx, cy + R + 36);
 }
 function drawTerminal(L) {
   const { tx: x, ty: y, tw: w, th: h } = L;
@@ -1251,16 +1590,25 @@ function drawTerminal(L) {
     termButtons.push({ id, x: bx, y: ly - 12, w: bw, h: 18 });
   });
   ly += 24;
+  // Horn: fires on compressed air, so it works without power (but not with a frozen panel)
+  {
+    const h = mod('HORN'), ok = h.slot >= 0 && !h.carried && !h.broken, bw = w - 20;
+    ctx.fillStyle = ok && hornCharges ? '#432' : '#222'; ctx.fillRect(x + 10, ly - 12, bw, 18);
+    ctx.fillStyle = ok && hornCharges ? '#fa4' : '#777';
+    ctx.fillText(`[Q] FIRE HORN  ${'#'.repeat(hornCharges)}${'.'.repeat(HORN_CHARGES - hornCharges)}  ${!ok ? (h.broken ? 'MODULE BROKEN' : 'NOT INSTALLED') : SLOTS[h.slot].name + ' SIDE'}`, x + 14, ly + 1);
+    termButtons.push({ id: 'horn', x: x + 10, y: ly - 12, w: bw, h: 18 });
+    ly += 24;
+  }
   if (pumpSpark > 0) line('PUMP RUNNING DRY!', Math.floor(time * 8) % 2 ? '#ff5' : '#e44');
   // Slots
   line('SLOTS: ' + SLOTS.map((s, i) => { const m = moduleIn(i); return `${s.name}=${m ? m.id + (m.broken ? '!' : '') : '-'}`; }).join(' '), '#8ca');
   const bad = [];
   if (parts.propeller.broken) bad.push('PROPELLER DEAD'); else if (parts.propeller.bumps) bad.push(`PROPELLER ${parts.propeller.bumps}/${PROP_BUMPS}`);
-  if (parts.panel.broken) bad.push('PANEL FROZEN');
-  if (parts.storage.broken) bad.push('STORAGE');
-  if (parts.pumpMech.dead) bad.push('PUMP GONE'); else if (parts.pumpMech.broken) bad.push('PUMP');
+  if (parts.panel.broken) bad.push('PANEL FROZEN'); else if (parts.panel.worn) bad.push('panel dmg');
+  if (parts.storage.broken) bad.push('STORAGE'); else if (parts.storage.worn) bad.push('storage dmg');
+  if (parts.pumpMech.dead) bad.push('PUMP GONE'); else if (parts.pumpMech.broken) bad.push('PUMP'); else if (parts.pumpMech.worn) bad.push('pump dmg');
   if (arm.broken) bad.push('ARM'); else if (arm.hits) bad.push(`ARM ${arm.hits}/${ARM_MAX_HITS}`);
-  for (const m of modules) if (m.broken) bad.push(m.id + ' MODULE');
+  for (const m of modules) if (m.broken) bad.push(m.id + ' MODULE'); else if (m.worn) bad.push(m.id.toLowerCase() + ' dmg');
   line(bad.length ? 'DAMAGE: ' + bad.join(', ') : 'DAMAGE: NONE', bad.length ? '#fa3' : '#4c8');
   ly += 6; line('-- LOG --', '#5f9');
   const room = Math.floor((y + h - ly) / 16);
@@ -1277,11 +1625,11 @@ function snapshotMonitors() {
 // Storage inventory: stored modules as cards you click to take
 function drawInventory() {
   const W = cv.width, H = cv.height, stored = modules.filter(m => m.slot < 0 && !m.carried);
-  const w = 420, h = 200, x = (W - w) / 2, y = (H - h) / 2;
+  const w = 580, h = 200, x = (W - w) / 2, y = (H - h) / 2;
   ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, W, H);
   rect([x, y, w, h], '#3a2a10', '#ff8a00');
   ctx.textAlign = 'left'; ctx.font = 'bold 14px monospace'; ctx.fillStyle = '#ffb040'; ctx.fillText('STORAGE', x + 14, y + 24);
-  ctx.font = '12px monospace'; ctx.fillStyle = '#ddd'; ctx.fillText(`SPARE PARTS: ${spare}/${MAX_PARTS}`, x + 14, y + 44);
+  ctx.font = '12px monospace'; ctx.fillStyle = '#ddd'; ctx.fillText(`SPARE PARTS: ${spare}/${MAX_PARTS}    HORN CHARGES: ${hornCharges}/${HORN_CHARGES}`, x + 14, y + 44);
   invButtons = [];
   stored.forEach((m, i) => {
     const bx = x + 14 + i * 100, by = y + 64;
@@ -1291,6 +1639,14 @@ function drawInventory() {
     invButtons.push({ m, x: bx, y: by, w: 88, h: 70 });
   });
   if (!stored.length) { ctx.fillStyle = '#888'; ctx.fillText('no modules stored', x + 14, y + 100); }
+  // Burn a horn charge as emergency oxygen
+  {
+    const bx = x + w - 150, by = y + 64, can = hornCharges > 0 && air < 1;
+    rect([bx, by, 136, 70], can ? '#1b3a4a' : '#222', can ? '#9df' : '#555');
+    ctx.fillStyle = can ? '#9df' : '#777'; ctx.font = 'bold 12px monospace'; ctx.fillText('VENT A CHARGE', bx + 8, by + 26);
+    ctx.font = '11px monospace'; ctx.fillText(`+${Math.round(CHARGE_AIR * 100)}% AIR`, bx + 8, by + 46);
+    invButtons.push({ vent: true, x: bx, y: by, w: 136, h: 70 });
+  }
   ctx.fillStyle = '#aaa'; ctx.fillText('click a module to take it   -   E / click outside to close', x + 14, y + h - 14);
 }
 
@@ -1312,7 +1668,7 @@ function draw() {
   const I = (x, y) => [x, y];
   drawRail(I, 1);
   ctx.globalAlpha = 1 - (1 - DIM_STANDING) * e;   // outside dims when standing
-  drawBalloons(I, 1); drawArm(I, 1, 2 / viewScale);
+  drawBalloons(I, 1); drawArm(I, 1, 2 / viewScale); drawHornWaves(I, 1 / viewScale);
   ctx.globalAlpha = 1;
   drawSub();
   ctx.restore();
@@ -1344,7 +1700,7 @@ function draw() {
   ctx.fillStyle = '#ddd';
   const left = DIVES_PER_QUOTA - (divesDone % DIVES_PER_QUOTA);
   ctx.fillText(`QUOTA ${paid}/${quota}  due in ${left} dive${left > 1 ? 's' : ''}`, 16, 128);
-  ctx.fillText(`SPARE PARTS ${spare}/${MAX_PARTS}`, 16, 146);
+  ctx.fillText(`SPARE PARTS ${spare}/${MAX_PARTS}   HORN ${hornCharges}/${HORN_CHARGES}`, 16, 146);
   ctx.fillStyle = arm.broken ? '#e44' : arm.hits ? '#fa3' : '#4c8';
   ctx.fillText(arm.broken ? 'ARM BROKEN' : arm.hits ? 'ARM HIT' : 'ARM OK', 16, 164);
 
@@ -1362,7 +1718,7 @@ function draw() {
     ctx.font = '12px monospace'; ctx.fillStyle = '#ccc'; ctx.fillText(hint, W / 2, 58);
   }
   ctx.font = '12px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = '#7ab';
-  const dbg = [`SPD ${Math.hypot(sub.vx, sub.vy).toFixed(0)}`, `CREATURE ${(Math.hypot(sub.x - CREATURE_X, sub.y - CREATURE_Y) / 10).toFixed(0)} m`,
+  const dbg = [`SPD ${Math.hypot(sub.vx, sub.vy).toFixed(0)}`, `CREATURE ${(Math.hypot(sub.x - creature.x, sub.y - creature.y) / 10).toFixed(0)} m`,
     `MODE ${mode}  FIG ${fig.x.toFixed(0)} face ${fig.face}`, `ENGINE ${engine.state}${engine.report ? ' ' + engine.report : ''}`, `RUN ${runTime.toFixed(0)}s  QUOTAS ${quotasMet}`];
   dbg.forEach((t, i) => ctx.fillText(t, W - 12, 18 + i * 16));
 
