@@ -52,7 +52,7 @@ Parts:
 - Propeller: outside, back. Thrust. Breaks, cannot be repaired. Only creatures break it, 3 bumps (warning stage).
 - Engine: inside, back, own hatch (wheel lock). Power for everything. Internals repairable from inside.
 - Control panel (green): front wall, facing the chair. On/off for every system, power readout, damage reports, runs the arm. Second most important after the engine.
-- Storage (orange): top. Holds shockwave charges and spare parts. Most fragile, 1 in 2 break roll.
+- Storage (orange): top. Holds the 3 gas canisters, spare parts (max 6) and spare modules. Most fragile, 1 in 2 break roll; a break destroys one stored part.
 - Water pump mechanism (blue): floor, front corner. Only works with the pump module installed in the floor (bottom) slot.
 - Hull: 200 HP, 20 per hit. Most durable.
 - Arm: slides on a rail along the bottom middle.
@@ -103,7 +103,7 @@ Control panel failure: everything freezes in its current state (systems, screens
 - Demo creature: one, stationary, about 70x70, invisible until pinged. Contact: 30 damage, hard knockback, always an engine malfunction, bumps the propeller.
 
 ## Hatches, water, pump, modules
-- Horn: Q (or the terminal button) from the chair. Runs on 3 compressed-air charges (refilled at the dock), no power needed, but a frozen panel can't fire it. The blast goes out of whatever side the horn is mounted on, shoves a creature it catches away (it drifts back), and kicks the sub the other way. Charges can be vented into the cabin from storage for +30% air.
+- Horn: Q (or the terminal button) from the chair. Each blast uses one gas canister from storage (3, refilled at the dock), no power needed, but a frozen panel can't fire it. The blast goes out of whatever side the horn is mounted on, shoves a creature it catches away (it drifts back), and kicks the sub the other way. A canister can instead be taken in hand and its valve opened (hold E, 1 s) for +30% air.
 - Modules: sonar, pump, air generator, horn. Any module fits any slot; taking one out or putting one in cycles the hatch and traps one bucket of water (5%). Free while docked.
 - Spare modules live in the orange storage: touch it and press E to open the inventory, click a module to take it in your hand, click a slot to install it (whatever was there swaps into your hand).
 - Air generator: works in any slot, needs power. Not installed or no power = air falls (60 s), the hand crank slows that.
@@ -111,14 +111,33 @@ Control panel failure: everything freezes in its current state (systems, screens
 - Pump runs only in the floor slot, needs water to run. Dry running sparks for 1.5 s then explodes (dead for the run, dumps air). Manual on/off only.
 - Pump clears one bucket per 10 s and drains fuel.
 - Water is a lock, not weight: above 30% you cannot ascend. 100% = sunk.
+
+## Water physics
+- Two bodies of water: the cabin and the sealed engine room. Each has a surface that tilts with the sub (stays level in the world) and sloshes: a spring driven by the sub's acceleration, so a hard turn or a hit throws it to one side.
+- Hull leak: below 80% hull the cabin takes water slowly, faster the worse the hull (about 14%/min at the 51% you leave the dock with, 0.8%/s near 0). The pump (30%/min) outruns it, so a damaged hull means the pump has to keep running.
+- Engine room: a malfunction floods it to 80%. While the door is sealed it stays in there. Open the door and it pours into the cabin through the doorway (you see the stream) until the two levels match; cabin water above the engine room floor flows back the other way. With a broken propeller, an open door lets the sea in through the shaft.
+- Over 40% the water shorts the terminal: it goes dead until the cabin is nearly dry (under 5%). Keep it under 40%.
+- When the water covers the seated head height you can't sit (if you're seated you get pushed up). When it covers your standing head you're drowning: air drops fast.
 - Spare parts are the weight: constant slow sink, more inertia, slower throttle spool-up.
 
 ## Arm, loot, economy
 - Arm is the income. Hold E while seated, aims at the mouse on the sonar screen, base slides on its rail. Reach 90 px.
-- Grabs automatically. Relics: tie a balloon in 1.5 s, they float up and count when they leave the top. Scrap: pulled into storage as spare parts.
+- Grabs automatically. Relics: tie a balloon in 1.5 s, they float up and count when they leave the top. Scrap: pulled in and dropped on the cabin floor as a loose part. Loose items slide with the tilt and get thrown around by hits; carry them to the storage to stow them.
 - Two hits while holding a relic break the arm. Broken arm: repaired only at the dock.
 - Demo loot: 8 relics per dive (125 coins each), two near the creature. Scrap respawns each dive.
 - Spare parts: burned by mid-dive repairs (docked repairs are free).
+
+## Items and hands-on repairs
+- Three spare part types, each its own item: COMPRESSION PIPE (fixes the pump), AIR FILTER (fixes the air generator), METAL PART (fixes everything else: engine, panel, storage, sonar, horn). Plus GAS CANISTERS for the horn.
+- Start of every dive: 1 of each part + 3 canisters in storage. Scrap rolls a type (metal is twice as common).
+- Mid-dive repair: open the storage (touch + E), click the part to take it in your hand, walk to the broken thing, touch it and hold E. The part is used up. Wrong part = refused with a hint. Minigames come later.
+- Click with an item in hand to drop it; touch a floor item and click to pick it up; touch the storage with it to stow it.
+- Parts are weight (slow sink, inertia); canisters aren't counted.
+
+## Vision
+- The engine room is pitch black while its door is sealed; it fades in as the door opens.
+- Standing, you only see the way you face: everything behind your back fades to black.
+- Low air (under 55%): the view blurs and closes in, a breathing pulse, worse the lower it goes.
 
 ## Open questions
 - Sonar and horn swap freely between slots (decided: yes, any slot; pump only works in the floor slot).
