@@ -2,7 +2,7 @@
 
 ## External assets used
 
-None yet. Every texture, prop and sound in the game is generated in code at load time.
+None yet. Every texture, prop and sound in the game is generated in code at load time (sounds are Web Audio oscillators and filtered noise, see the AUDIO section of `index.html`).
 
 The CC0 sources from the asset brief could not be downloaded. This build environment's network policy blocks them: the proxy answered `403` to CONNECT for every one of these hosts. Because no file was downloaded, no license page could be checked either, so nothing external is included.
 

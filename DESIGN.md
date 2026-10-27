@@ -52,7 +52,7 @@ Parts:
 - Propeller: outside, back. Thrust. Breaks, cannot be repaired. Only creatures break it, 3 bumps (warning stage).
 - Engine: inside, back, own hatch (wheel lock). Power for everything. Internals repairable from inside.
 - Control panel (green): front wall, facing the chair. On/off for every system, power readout, damage reports, runs the arm. Second most important after the engine.
-- Storage (orange): top. Holds the 3 gas canisters, spare parts (max 6) and spare modules. Most fragile, 1 in 2 break roll; a break destroys one stored part.
+- Storage (orange): top. Holds the 3 gas canisters, spare parts (max 6) and spare modules. Most fragile, 1 in 2 break roll; a break destroys one stored part. While it's broken it won't open and the stored canisters bleed out one at a time (25 s each, the gas goes into the cabin air). Patch it with a METAL part to stop it.
 - Water pump mechanism (blue): floor, front corner. Only works with the pump module installed in the floor (bottom) slot.
 - Hull: 200 HP, 20 per hit. Most durable.
 - Arm: slides on a rail along the bottom middle.
@@ -130,7 +130,12 @@ Control panel failure: everything freezes in its current state (systems, screens
 ## Items and hands-on repairs
 - Three spare part types, each its own item: COMPRESSION PIPE (fixes the pump), AIR FILTER (fixes the air generator), METAL PART (fixes everything else: engine, panel, storage, sonar, horn). Plus GAS CANISTERS for the horn.
 - Start of every dive: 1 of each part + 3 canisters in storage. Scrap rolls a type (metal is twice as common).
-- Mid-dive repair: open the storage (touch + E), click the part to take it in your hand, walk to the broken thing, touch it and hold E. The part is used up. Wrong part = refused with a hint. Minigames come later.
+- Mid-dive repair: open the storage (touch + click), click the part to take it in your hand, walk to the broken thing, touch it and press E. That starts the part's minigame; finishing it uses the part up. Wrong part = refused with a hint.
+- Minigames (docked repairs skip them, just a quick hold):
+  - METAL: hammer rivets. A marker sweeps a bar; E or click when it's in the green. 3 rivets (4 for the engine), each a bit faster. A miss just costs time.
+  - PIPE: tighten the compression fitting. Circle the mouse clockwise around the nut, 2.5 turns; counter-clockwise backs it off.
+  - FILTER: slide the cartridge in. The gap in the housing drifts; keep the cartridge under it with the mouse and hold E to push. Off the gap it jams and slips back.
+  - A/D, ESC or getting knocked down by a hit stops it. Progress is kept for that repair until you finish it or dock.
 - Click with an item in hand to drop it; touch a floor item and click to pick it up; touch the storage with it to stow it.
 - Parts are weight (slow sink, inertia); canisters aren't counted.
 
@@ -138,6 +143,20 @@ Control panel failure: everything freezes in its current state (systems, screens
 - The engine room is pitch black while its door is sealed; it fades in as the door opens.
 - Standing, you only see the way you face: everything behind your back fades to black.
 - Low air (under 55%): the view blurs and closes in, a breathing pulse, worse the lower it goes.
+
+## Sound
+All synthesized in code (no files). A master bus with a muffle filter that closes when your head is under water or you're low on air, plus a long dark reverb for the ocean.
+- Loops: deep ocean rumble (louder deeper), engine (two detuned saws, pitch follows the throttle), propeller wash, pump motor, water pouring through the bay door, hull leak trickle, gas hiss from a broken storage, and the creature: a sub-bass throb that swells as you get close whether you've seen it or not.
+- Ambient: hull creaks (more often deeper and with a beaten hull), distant groans.
+- Sonar: a classic ping (directional) and a lower, longer one (all-around), faint return blips as echoes come back, and a wrong-sounding detuned tone when a return is the creature.
+- Hits, the creature's roar, horn blast, alarm two-tone while the red light is on, heartbeat when air is low, footsteps (splashy in water), wheel ratchet, crank squeak, module clunks, item clinks, valve hiss, engine starter, breaker, short-circuit zap, pump explosion, implosion on death, minigame hammer/ratchet/scrape.
+- M mutes.
+
+## Onboarding
+- Title screen with the pitch and all controls; click to start (also unlocks audio). TAB shows the controls any time.
+- First-time tips: a small card at the top the first time each situation comes up (docked, first dive, standing, loot on sonar, the creature on sonar, first damage, loot on the floor, engine off / malfunction, water, power out, air falling, panel frozen, storage broken, low fuel, back at the dock). Each shows once per browser; ENTER dismisses. Tips whose moment has passed are dropped.
+- Death screen says what killed you and one line on how to avoid it.
+- The debug readout (speed, creature distance, fps) is hidden; ` toggles it.
 
 ## Open questions
 - Sonar and horn swap freely between slots (decided: yes, any slot; pump only works in the floor slot).

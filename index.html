@@ -44,7 +44,6 @@ const PROP_BUMP_CHANCE = 0.75; // a creature touch doesn't always land on the pr
 const PREVENTION_CHANCE  = 0.25; // rock hit that did hull damage -> engine safety shutdown
 const REPORT_LEAD        = 0.5;  // terminal reports this long BEFORE the engine actually stops
 const RESTART_PREVENTION = 2.0;  // hold E with your hand on the engine
-const RESTART_MALFUNCTION= 5.0;
 const TERMINAL_BACKUP    = 7.0;  // terminal stays readable this long after power drops
 const RED_LIGHT_TIME     = 30;   // emergency light, then pitch dark
 const SUFFOCATE_TIME     = 60;   // seconds of air without a working air generator
@@ -79,7 +78,13 @@ const SLOSH_PUSH    = 0.0009;// how hard the sub's acceleration throws the water
 const DRY_SPARK_TIME= 1.5;   // pump running dry sparks this long, then explodes
 const PUMP_BLAST_AIR= 0.25;  // air lost when the pump explodes
 // Repairs + spare parts
-const REPAIR_TIME      = 4.0;  // mid-dive: hold the right part in your hand, touch the broken thing, hold E (uses the part up)
+// Mid-dive repairs: hold the right part, touch the broken thing, press E, then play its minigame (uses the part up)
+const RIVETS           = 3;    // METAL: hammer this many rivets (engine: one more); E when the swinging marker is in the green
+const RIVET_SPEED      = 0.8;  // marker sweeps across the bar per second (each rivet a bit faster)
+const RIVET_ZONE       = 0.18; // width of the green zone (fraction of the bar)
+const SCREW_TURNS      = 2.5;  // PIPE: circle the mouse clockwise this many turns to tighten the fitting
+const FILTER_TIME      = 3.0;  // FILTER: seconds of pushing (hold E) with the cartridge lined up under the guide
+const FILTER_SLACK     = 0.12; // how far off the guide (fraction of the track) still slides in
 const DOCK_REPAIR_TIME = 1.5;  // free while docked
 const MAX_PARTS        = 6;    // spare parts the storage holds (gas canisters have their own rack)
 const START_PARTS      = ['METAL', 'PIPE', 'FILTER'];   // in storage at the start of a run
@@ -142,7 +147,8 @@ const HORN_ARC        = 1.0;   // radians each side of the slot's facing
 const HORN_PUSH       = 320;   // px/s the shockwave shoves a creature away
 const HORN_RECOIL     = 60;    // px/s kick on the sub, opposite the blast
 const CREATURE_RETURN = 20;    // px/s a shoved creature drifts back home
-const CHARGE_AIR      = 0.3;   // carry a canister, hold E to open its valve: this much air
+const CHARGE_AIR      = 0.3;   // carry a canister, hold E to open its valve: this much air (a full one)
+const CANISTER_LEAK_TIME = 25; // broken storage: a stored canister bleeds empty in this many seconds, one at a time (the gas ends up in the cabin air)
 // Loot + robot arm
 const RELIC_SIZE     = 16;
 const RELIC_VALUE    = 125;    // the two bait relics by the creature
@@ -366,7 +372,7 @@ function reset() {
   // slosh = the surface's extra tilt from the sub's acceleration (a damped spring)
   engWater = 0; slosh = { a: 0, v: 0, lastVx: 0 }; termShorted = false;
   // Loose items: spare parts (PIPE, FILTER, METAL) and gas canisters. where: 'storage' | 'hand' | 'floor'
-  items = [...START_PARTS.map(type => ({ type, where: 'storage' })), ...Array.from({ length: HORN_CHARGES }, () => ({ type: 'CANISTER', where: 'storage' }))];
+  items = [...START_PARTS.map(type => ({ type, where: 'storage' })), ...Array.from({ length: HORN_CHARGES }, () => ({ type: 'CANISTER', where: 'storage', gas: 1 }))];
   // Engine: 'running' | 'off'. report = why it's off. stopIn > 0 = report shown, engine still turning.
   engine = { state: 'running', report: null, stopIn: 0, flooded: false };
   gen = { on: true, boot: 0 };
@@ -393,6 +399,7 @@ function reset() {
   carry = null;                            // what's in the hand: a module or an item
   inv = { open: false };                   // storage inventory window
   hold = { id: null, t: 0, lock: false };
+  fix = null; fixSaved = {};
   mode = 'seated'; standT = 0; zoomT = 0;
   fig = { x: 30, vx: 0, face: 1, stun: 0, walk: 0 };
   hand = { x: 50, y: 0 };
@@ -431,7 +438,9 @@ const carriedName = c => isItem(c) ? ITEM_TYPES[c.type].short : c.id;
 const sparesAboard = () => items.filter(i => i.type !== 'CANISTER').length;            // weight
 const storedParts = () => items.filter(i => i.where === 'storage' && i.type !== 'CANISTER').length;
 const storedOf = type => items.filter(i => i.where === 'storage' && i.type === type).length;
-const canisters = () => storedOf('CANISTER');                                          // horn charges
+const canisters = () => storedOf('CANISTER');
+const storedCanisters = () => items.filter(i => i.where === 'storage' && i.type === 'CANISTER');
+const storageLeaking = () => parts.storage.broken && phase === 'dive' && storedCanisters().length > 0;                                          // horn charges
 const mass = () => 1 + sparesAboard() * PART_MASS;
 const moduleIn = slot => modules.find(m => m.slot === slot && !m.carried);
 const mod = id => modules.find(m => m.id === id);
@@ -500,27 +509,156 @@ function sonarMouseWorld() {
 }
 
 // ===================== AUDIO =====================
-let actx = null, hum = null;
+// Everything is synthesized here, no sound files. Every sound goes into one master bus, then a "muffle" low-pass
+// (it closes when your head is under water or you're running out of air), then out. Big ocean sounds also go
+// through a long dark reverb. Loops (engine, pump, water, creature) are always running and just faded in and out.
+const MASTER_VOL = 0.8;
+let actx = null, bus = null, noiseBuf = null, loops = null, muted = false;
 function initAudio() {
-  if (actx) return;
+  if (actx) { if (actx.state === 'suspended') actx.resume(); return; }
   try {
     actx = new AudioContext();
-    // Engine hum: rises with the throttle so spool-up reads as weight, not input lag
-    const o = actx.createOscillator(), g = actx.createGain();
-    o.type = 'triangle'; o.frequency.value = 50; g.gain.value = 0;
-    o.connect(g); g.connect(actx.destination); o.start();
-    hum = { o, g };
-  } catch (e) {}
+    const master = actx.createGain(); master.gain.value = muted ? 0 : MASTER_VOL;
+    const muffle = actx.createBiquadFilter(); muffle.type = 'lowpass'; muffle.frequency.value = 18000;
+    const comp = actx.createDynamicsCompressor();
+    master.connect(muffle); muffle.connect(comp); comp.connect(actx.destination);
+    noiseBuf = actx.createBuffer(1, actx.sampleRate * 2, actx.sampleRate);
+    const nd = noiseBuf.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+    // Reverb: 4 s of decaying noise as the impulse, darkened
+    const len = actx.sampleRate * 4, ir = actx.createBuffer(2, len, actx.sampleRate);
+    for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); let lp = 0; for (let i = 0; i < len; i++) { lp += (Math.random() * 2 - 1 - lp) * 0.25; d[i] = lp * Math.pow(1 - i / len, 2.4); } }
+    const verb = actx.createConvolver(); verb.buffer = ir;
+    const wet = actx.createGain(); wet.gain.value = 0.9; verb.connect(wet); wet.connect(master);
+    bus = { master, muffle, verb };
+    // Loops
+    const noiseLoop = (type, freq, q) => {
+      const src = actx.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+      const f = actx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
+      const g = actx.createGain(); g.gain.value = 0; src.connect(f); f.connect(g); g.connect(master); src.start();
+      return { f, g };
+    };
+    const oscLoop = (type, freq, cut) => {
+      const o = actx.createOscillator(); o.type = type; o.frequency.value = freq;
+      const f = actx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = cut;
+      const g = actx.createGain(); g.gain.value = 0; o.connect(f); f.connect(g); g.connect(master); o.start();
+      return { o, f, g };
+    };
+    loops = {
+      ocean:  noiseLoop('lowpass', 140, 0.7),    // deep rumble, always there
+      eng1:   oscLoop('sawtooth', 42, 240),      // engine: two detuned saws, pitch follows the throttle
+      eng2:   oscLoop('sawtooth', 84.6, 300),
+      wash:   noiseLoop('bandpass', 420, 0.9),   // propeller wash
+      pump:   oscLoop('square', 118, 520),
+      stream: noiseLoop('bandpass', 850, 0.6),   // water pouring through the bay door
+      leak:   noiseLoop('bandpass', 2600, 1.5),  // hull leak trickle
+      hiss:   noiseLoop('highpass', 3200, 0.7),  // gas escaping a broken storage
+      beast:  oscLoop('sawtooth', 31, 110),      // the creature: a sub-bass throb you feel before you see it
+      beast2: oscLoop('sine', 46.5, 200),
+    };
+  } catch (e) { actx = null; }
 }
-function tone(freq, dur, delay = 0, type = 'square', vol = 0.04) {
-  if (!actx) return;
-  const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime + delay;
-  o.type = type; o.frequency.value = freq;
-  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur);
+const at = (delay = 0) => actx.currentTime + delay;
+const fade = (g, v, tc = 0.12) => g.gain.setTargetAtTime(v, actx.currentTime, tc);
+// One-shot oscillator. opts: glide (end frequency), verb (send to reverb), attack, cut (low-pass)
+function tone(freq, dur, delay = 0, type = 'square', vol = 0.04, opts = {}) {
+  if (!actx || !bus) return;
+  const o = actx.createOscillator(), g = actx.createGain(), t = at(delay), atk = opts.attack || 0.004;
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (opts.glide) o.frequency.exponentialRampToValueAtTime(opts.glide, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + atk); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  let out = o;
+  if (opts.cut) { const f = actx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = opts.cut; o.connect(f); out = f; }
+  out.connect(g); g.connect(bus.master);
+  if (opts.verb) { const s = actx.createGain(); s.gain.value = opts.verb; g.connect(s); s.connect(bus.verb); }
+  o.start(t); o.stop(t + dur + 0.05);
 }
-const thud = () => { tone(70, 0.25, 0, 'sine', 0.25); tone(45, 0.3, 0.02, 'sine', 0.2); };
-const roar = () => { tone(38, 0.7, 0, 'sawtooth', 0.12); tone(55, 0.5, 0.1, 'sawtooth', 0.1); };
+// One-shot filtered noise. opts: type, freq, glide (end filter freq), q, attack, verb
+function noise(dur, vol, opts = {}) {
+  if (!actx || !bus) return;
+  const src = actx.createBufferSource(), f = actx.createBiquadFilter(), g = actx.createGain(), t = at(opts.delay || 0);
+  src.buffer = noiseBuf; src.playbackRate.value = 0.8 + Math.random() * 0.4;
+  f.type = opts.type || 'lowpass'; f.frequency.setValueAtTime(opts.freq || 1000, t); f.Q.value = opts.q || 0.8;
+  if (opts.glide) f.frequency.exponentialRampToValueAtTime(opts.glide, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + (opts.attack || 0.005)); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(f); f.connect(g); g.connect(bus.master);
+  if (opts.verb) { const s = actx.createGain(); s.gain.value = opts.verb; g.connect(s); s.connect(bus.verb); }
+  src.start(t, Math.random() * 1.5); src.stop(t + dur + 0.05);
+}
+// The sound library
+const SFX = {
+  thud:    () => { noise(0.45, 0.5, { freq: 320, glide: 90 }); tone(62, 0.4, 0, 'sine', 0.35, { glide: 34 }); tone(170 + Math.random() * 40, 0.9, 0.02, 'triangle', 0.035, { verb: 0.6 }); },
+  roar:    () => { noise(1.6, 0.45, { freq: 700, glide: 120, q: 2, attack: 0.08, verb: 0.7 }); tone(44, 1.5, 0, 'sawtooth', 0.22, { glide: 27, cut: 300, attack: 0.05 });
+                   tone(66, 1.2, 0.1, 'sawtooth', 0.12, { glide: 40, cut: 400 }); noise(0.7, 0.15, { type: 'bandpass', freq: 1800, glide: 600, q: 4, delay: 0.05 }); },
+  creak:   () => { const f = 160 + Math.random() * 120; noise(0.8 + Math.random() * 0.9, 0.11, { type: 'bandpass', freq: f, glide: f * (0.6 + Math.random() * 0.3), q: 14, attack: 0.15, verb: 0.5 }); },
+  groan:   () => { tone(95 + Math.random() * 40, 3.5, 0, 'sine', 0.05, { glide: 55, attack: 0.8, verb: 1.2 }); tone(140, 2.5, 0.6, 'sine', 0.02, { glide: 90, attack: 0.6, verb: 1.2 }); },
+  ping:    () => { tone(1380, 1.4, 0, 'sine', 0.09, { glide: 1290, verb: 0.9 }); tone(2760, 0.3, 0, 'sine', 0.015); },
+  omni:    () => { tone(520, 1.8, 0, 'sine', 0.1, { glide: 470, verb: 1.1 }); tone(1040, 0.9, 0, 'sine', 0.025, { glide: 950, verb: 0.6 }); },
+  ret:     b => tone(1300 + Math.random() * 120, 0.12, 0, 'sine', 0.006 + 0.01 * b, { verb: 0.4 }),
+  retBeast:() => { tone(260, 0.9, 0, 'sine', 0.04, { glide: 200, verb: 1 }); tone(277, 0.9, 0, 'sine', 0.03, { glide: 190, verb: 1 }); },
+  horn:    () => { tone(62, 1.5, 0, 'sawtooth', 0.28, { cut: 500, attack: 0.03, verb: 0.8 }); tone(93, 1.3, 0, 'sawtooth', 0.15, { cut: 600, attack: 0.03 }); noise(0.5, 0.3, { freq: 900, glide: 200 }); },
+  clunk:   () => { tone(95, 0.3, 0, 'sine', 0.3, { glide: 55 }); noise(0.12, 0.2, { freq: 1500, glide: 300 }); },
+  gush:    () => noise(0.7, 0.18, { type: 'bandpass', freq: 900, glide: 400, attack: 0.03 }),
+  clink:   () => { tone(1900 + Math.random() * 300, 0.08, 0, 'triangle', 0.04); tone(2900, 0.05, 0.01, 'triangle', 0.02); },
+  drop:    () => { tone(160, 0.12, 0, 'sine', 0.15, { glide: 90 }); tone(1400, 0.06, 0, 'triangle', 0.02); },
+  vent:    () => noise(1.2, 0.18, { type: 'highpass', freq: 2500, glide: 4000, attack: 0.02 }),
+  starter: () => { tone(30, 1.1, 0, 'sawtooth', 0.12, { glide: 90, cut: 600, attack: 0.1 }); noise(0.08, 0.2, { type: 'highpass', freq: 2000 }); tone(42, 0.6, 1.0, 'sawtooth', 0.12, { cut: 300 }); },
+  breaker: () => { noise(0.06, 0.4, { type: 'highpass', freq: 1500 }); tone(120, 0.25, 0, 'square', 0.08, { cut: 900 }); },
+  zap:     () => { for (let i = 0; i < 5; i++) noise(0.05, 0.2, { type: 'highpass', freq: 3000, delay: i * 0.06 * Math.random() * 2 }); tone(60, 0.5, 0, 'square', 0.06, { cut: 400 }); },
+  spark:   () => noise(0.04, 0.12, { type: 'highpass', freq: 4000 }),
+  boom:    () => { noise(1.4, 0.7, { freq: 900, glide: 60, verb: 0.6 }); tone(48, 1.2, 0, 'sine', 0.4, { glide: 22 }); },
+  implode: () => { noise(3, 0.8, { freq: 1600, glide: 40, attack: 0.02, verb: 1 }); tone(40, 2.8, 0, 'sawtooth', 0.3, { glide: 18, cut: 300 }); },
+  step:    wet => wet ? noise(0.2, 0.08, { type: 'bandpass', freq: 1100, glide: 600 }) : (noise(0.05, 0.06, { type: 'highpass', freq: 1800 }), tone(130, 0.07, 0, 'triangle', 0.035)),
+  ratchet: () => { tone(2300, 0.02, 0, 'square', 0.015); noise(0.02, 0.05, { type: 'highpass', freq: 3500 }); },
+  squeak:  () => tone(700 + Math.random() * 80, 0.1, 0, 'triangle', 0.012, { glide: 780 }),
+  hammer:  () => { tone(1250, 0.35, 0, 'triangle', 0.09, { verb: 0.3 }); tone(1870, 0.25, 0, 'triangle', 0.05); noise(0.05, 0.25, { type: 'highpass', freq: 2500 }); },
+  miss:    () => { tone(140, 0.12, 0, 'square', 0.05, { cut: 800 }); SFX.spark(); },
+  scrape:  () => noise(0.15, 0.07, { type: 'bandpass', freq: 320, q: 5 }),
+  slide:   () => noise(0.08, 0.035, { type: 'bandpass', freq: 750, q: 2 }),
+  fixed:   () => { tone(660, 0.1, 0, 'triangle', 0.05); tone(880, 0.1, 0.09, 'triangle', 0.05); tone(1320, 0.2, 0.18, 'triangle', 0.05); },
+  sold:    () => { tone(1320, 0.15, 0, 'triangle', 0.04); tone(1760, 0.3, 0.08, 'triangle', 0.04); },
+  inflate: () => noise(1.2, 0.08, { type: 'bandpass', freq: 600, glide: 1400, attack: 0.3 }),
+  alarm:   () => { tone(880, 0.22, 0, 'square', 0.025, { cut: 2000 }); tone(660, 0.22, 0.26, 'square', 0.025, { cut: 2000 }); },
+  heart:   v => { tone(58, 0.14, 0, 'sine', 0.25 * v, { glide: 40 }); tone(52, 0.16, 0.2, 'sine', 0.18 * v, { glide: 38 }); },
+};
+const thud = SFX.thud, roar = SFX.roar;
+function toggleMute() { muted = !muted; if (bus) fade(bus.master, muted ? 0 : MASTER_VOL, 0.05); log(muted ? 'SOUND OFF (M)' : 'SOUND ON', 'good'); }
+// Loops and the ambient one-shots, once a frame
+const amb = { creak: 8, groan: 30, alarm: 0, heart: 0, ret: 0, beast: 0, step: 0 };
+function updateAudio(dt) {
+  if (!actx || !loops) return;
+  const diving = phase === 'dive' && !sub.dead, depth = clamp(sub.y / 5000, 0, 1), t = Math.hypot(throttle.x, throttle.y);
+  fade(loops.ocean.g, sub.dead ? 0.1 : 0.12 + 0.2 * depth, 0.5);
+  const run = power() && !sub.dead;
+  loops.eng1.o.frequency.setTargetAtTime(40 + 38 * t, at(), 0.15); loops.eng2.o.frequency.setTargetAtTime(81 + 75 * t, at(), 0.15);
+  fade(loops.eng1.g, run ? 0.05 + 0.06 * t : 0, 0.25); fade(loops.eng2.g, run ? 0.02 + 0.03 * t : 0, 0.25);
+  fade(loops.wash.g, run && !parts.propeller.broken ? 0.07 * t : 0, 0.2);
+  fade(loops.pump.g, pumpRunning() && !sub.dead ? (pumpSpark > 0 ? 0.045 : 0.025) : 0, 0.1);
+  fade(loops.stream.g, Math.min(0.3, doorStream * 2.5), 0.08);
+  const leaking = diving && sub.hp / MAX_HP < HULL_LEAK_FROM;
+  fade(loops.leak.g, leaking ? 0.015 + 0.05 * (1 - sub.hp / MAX_HP) : 0, 0.3);
+  fade(loops.hiss.g, diving && storageLeaking() ? 0.05 : 0, 0.15);
+  // The creature: a throb that swells as you get close, seen or not
+  const cd = Math.hypot(sub.x - creature.x, sub.y - creature.y), near = diving ? Math.pow(clamp(1 - cd / 480, 0, 1), 1.6) : 0;
+  const throb = 0.6 + 0.4 * Math.sin(time * 4.2);
+  fade(loops.beast.g, 0.22 * near * throb, 0.08); fade(loops.beast2.g, 0.12 * near, 0.2);
+  // Muffle: under water or out of breath, the world goes dull
+  const headY = mode === 'seated' ? CHAIR_HEAD_Y : footY(fig.x) - FIG_HEIGHT + 2, under = crewSurfAt(mode === 'seated' ? CHAIR_X - 3 : fig.x) < headY && diving;
+  const cut = under ? 420 : air < LOW_AIR_BLUR ? 900 + 17000 * (air / LOW_AIR_BLUR) ** 2 : 18000;
+  bus.muffle.frequency.setTargetAtTime(cut, at(), 0.15);
+  // Ambient one-shots: hull creaks (more often deeper and with a beaten hull), distant groans
+  if (diving) {
+    if ((amb.creak -= dt * (0.6 + depth * 1.5 + (1 - sub.hp / MAX_HP) * 1.5)) <= 0) { SFX.creak(); amb.creak = 6 + Math.random() * 12; }
+    if ((amb.groan -= dt * (0.4 + depth)) <= 0) { SFX.groan(); amb.groan = 25 + Math.random() * 30; }
+  }
+  // Emergency alarm while the red light is on; heartbeat when air is low
+  if (!power() && darkT < RED_LIGHT_TIME && diving) { if ((amb.alarm -= dt) <= 0) { SFX.alarm(); amb.alarm = 1.2; } } else amb.alarm = 0;
+  if (air < LOW_AIR_BLUR && !sub.dead) {
+    const f = 1 - air / LOW_AIR_BLUR;
+    if ((amb.heart -= dt) <= 0) { SFX.heart(0.4 + 0.6 * f); amb.heart = 1.1 - 0.6 * f; }
+  }
+  if (pumpSpark > 0 && Math.random() < dt * 14) SFX.spark();
+  amb.ret -= dt; amb.beast -= dt;
+}
 
 // ===================== TERMINAL LOG =====================
 function log(t, sev = 'warn') {
@@ -532,14 +670,15 @@ function log(t, sev = 'warn') {
 // ===================== DIVES + QUOTA =====================
 // Dock phase: held at the top, 60 s of free repairs, free module swaps, buy hull hits, pay quota.
 function startDock(first) {
-  phase = 'dock'; dockT = DOCK_TIME; maxDepth = 0;
+  phase = 'dock'; dockT = DOCK_TIME; maxDepth = 0; fix = null; fixSaved = {};
   sub.x = DOCK_X; sub.y = DOCK_Y; sub.vx = sub.vy = 0;
   if (!first) sub.hp = Math.max(sub.hp, Math.ceil(MAX_HP * HULL_FREE_FRACTION));
   water = 0; engWater = 0; termShorted = false; air = 1;
   if (fuel > 0) { engine.state = 'running'; engine.report = null; engine.stopIn = 0; }
   gen.on = true; gen.boot = 0; arm.hits = 0;
-  // Gas canisters topped back up to HORN_CHARGES (new ones go into storage)
-  for (let n = items.filter(i => i.type === 'CANISTER').length; n < HORN_CHARGES; n++) items.push({ type: 'CANISTER', where: 'storage' });
+  // Gas canisters refilled and topped back up to HORN_CHARGES (new ones go into storage)
+  for (const c of items) if (c.type === 'CANISTER') c.gas = 1;
+  for (let n = items.filter(i => i.type === 'CANISTER').length; n < HORN_CHARGES; n++) items.push({ type: 'CANISTER', where: 'storage', gas: 1 });
   hornWaves = [];
   creature.x = CREATURE_HOME[0]; creature.y = CREATURE_HOME[1]; creature.vx = creature.vy = 0;
   // Fresh loot every dive: the bait by the creature, a couple in the trench, most of it in the ruins
@@ -577,6 +716,7 @@ function buyHull() {
 function fail(reason) {
   if (sub.dead) return;
   sub.dead = true; failReason = reason;
+  if (reason !== 'QUOTA MISSED') SFX.implode();
 }
 
 // ===================== POWER + AIR =====================
@@ -654,11 +794,11 @@ function updateWater(dt) {
     if (water > 0) { water = Math.max(0, water - PUMP_RATE * dt); pumpSpark = 0; }
     else if ((pumpSpark += dt) >= DRY_SPARK_TIME) {
       parts.pumpMech.dead = true; pumpSpark = 0; air = Math.max(0, air - PUMP_BLAST_AIR);
-      kick(SHAKE_WALL * 2, 0); thud(); log('PUMP EXPLODED (RAN DRY)', 'bad');
+      kick(SHAKE_WALL * 2, 0); SFX.boom(); log('PUMP EXPLODED (RAN DRY)', 'bad');
     }
   } else pumpSpark = 0;
   // Water in the electrics: above WATER_SHORT the terminal shorts out until the cabin is (nearly) dry again
-  if (!termShorted && water > WATER_SHORT) { termShorted = true; log('WATER IN THE ELECTRICS - TERMINAL SHORTED', 'bad'); tone(90, 0.4, 0, 'sawtooth', 0.08); }
+  if (!termShorted && water > WATER_SHORT) { termShorted = true; log('WATER IN THE ELECTRICS - TERMINAL SHORTED', 'bad'); SFX.zap(); }
   else if (termShorted && water < WATER_DRY) { termShorted = false; log('TERMINAL DRY - BACK ONLINE', 'good'); }
   // Over your head: can't stay in the chair, and you lose air fast while under
   const headY = mode === 'seated' ? CHAIR_HEAD_Y : footY(fig.x) - FIG_HEIGHT + 2;
@@ -727,6 +867,7 @@ function breakPart(id) {
     const lost = items.filter(i => i.where === 'storage' && i.type !== 'CANISTER');
     if (lost.length) { const it = lost[Math.floor(Math.random() * lost.length)]; items.splice(items.indexOf(it), 1); log(`STORAGE HIT - LOST A ${ITEM_TYPES[it.type].short}`, 'bad'); }
     else log('STORAGE BROKEN', 'bad');
+    if (canisters()) log('GAS CANISTERS LEAKING - PATCH THE STORAGE', 'bad');
   } else if (id === 'pumpMech') log('PUMP MECHANISM BROKEN', 'bad');
   else if (id === 'propeller') log('PROPELLER DESTROYED', 'bad');
 }
@@ -761,11 +902,19 @@ function creatureHit(dirX) {
 
 // ===================== INPUT =====================
 addEventListener('keydown', e => {
+  if (e.code === 'Tab') e.preventDefault();
+  if (title) { if (!e.repeat && ['Space', 'Enter'].includes(e.code)) startGame(); return; }
   initAudio();
   if (!e.repeat) {
+    if (e.code === 'KeyM') toggleMute();
+    if (e.code === 'Backquote') showDebug = !showDebug;
+    if (e.code === 'Enter') dismissTip();
     if (e.code === 'KeyF') toggleSeat();
-    if (e.code === 'KeyE') tapE();
-    if (e.code === 'Escape') { inv.open = false; grip = null; }
+    if (e.code === 'KeyE') {
+      const t = !fix && handTarget();
+      if (fix) fixPress(); else if (t && t.can && t.game) startFix(t); else tapE();
+    }
+    if (e.code === 'Escape') { inv.open = false; grip = null; stopFix(null); }
     if (e.code === 'Space' && mode === 'seated') launch();
     if (e.code === 'KeyH') buyHull();
     if (e.code === 'KeyP') payQuota();
@@ -781,9 +930,11 @@ addEventListener('keyup', e => { keys[e.code] = false; if (e.code === 'KeyE') ho
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = mouse.rdown = false; grip = null; });
 cv.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
 cv.addEventListener('mousedown', e => {
+  if (title) { if (e.button === 0) startGame(); return; }
   initAudio();
   if (e.button === 2) { mouse.rdown = true; return; }
   if (e.button !== 0) return;
+  if (fix) return fixPress();
   if (mode === 'seated') {
     const b = termButtons.find(b => mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h);
     if (b) { if (b.id === 'horn') fireHorn(); else toggleSystem(b.id); return; }
@@ -791,8 +942,8 @@ cv.addEventListener('mousedown', e => {
   // Storage inventory: click a module to take it in your hand, or vent a horn charge for air
   if (inv.open) {
     const b = invButtons.find(b => mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h);
-    if (b && b.m) { carry = b.m; carry.carried = true; log(`TOOK ${carry.id}`, 'good'); }
-    else if (b && b.type) { const it = items.find(i => i.where === 'storage' && i.type === b.type); it.where = 'hand'; carry = it; log(`TOOK A ${ITEM_TYPES[b.type].short}`, 'good'); }
+    if (b && b.m) { carry = b.m; carry.carried = true; log(`TOOK ${carry.id}`, 'good'); SFX.clink(); }
+    else if (b && b.type) { const it = items.find(i => i.where === 'storage' && i.type === b.type); it.where = 'hand'; carry = it; log(`TOOK A ${ITEM_TYPES[b.type].short}`, 'good'); SFX.clink(); }
     inv.open = false; return;
   }
   mouse.down = true;
@@ -832,6 +983,7 @@ function handValid(p) {
   return (inRect(p, DOOR_GAP) && p.y > doorOpenTo()) || inRect(p, ENGINE_ROOM);
 }
 function updateHand(dt) {
+  if (fix) return;   // hand stays on the thing you're repairing
   const s = shoulder(), m = toLocal(mouseWorld());
   // Two facings, flips instantly to the mouse's side (small deadzone so he doesn't jitter when it's right above him)
   if (fig.stun <= 0 && !grip) {
@@ -865,8 +1017,8 @@ function handTarget() {
   const h = hand, docked = phase === 'dock', item = isItem(carry) ? carry : null;
   // Repairs: in the dive you need the matching part in your hand; it gets used up
   const repair = (id, name, need) => {
-    if (docked) return { id, hint: `HOLD E: REPAIR ${name} (FREE AT THE DOCK)`, hold: DOCK_REPAIR_TIME, can: true };
-    if (item && item.type === need) return { id, need, hint: `HOLD E: REPAIR ${name} (USES THE ${ITEM_TYPES[need].short})`, hold: REPAIR_TIME, can: true };
+    if (docked) return { id, name, hint: `HOLD E: REPAIR ${name} (FREE AT THE DOCK)`, hold: DOCK_REPAIR_TIME, can: true };
+    if (item && item.type === need) return { id, name, need, game: GAME_FOR[need], hint: `E: REPAIR ${name} (USES THE ${ITEM_TYPES[need].short})`, can: true };
     return { id, hint: `${name} NEEDS A ${ITEM_TYPES[need].short} - TAKE ONE FROM STORAGE`, can: false };
   };
   if (carry && !item) {   // holding a module
@@ -878,7 +1030,7 @@ function handTarget() {
     if (parts.storage.broken) return item && item.type === 'METAL' && !docked ? repair('storage', 'STORAGE', 'METAL') : { id: 'store', hint: 'STORAGE BROKEN', can: false };
     if (item && item.type !== 'CANISTER' && storedParts() >= MAX_PARTS) return { id: 'store', hint: 'STORAGE FULL', can: false };
     const r = parts.storage.worn ? repair('storage', 'STORAGE', 'METAL') : null;
-    return { id: 'store', click: true, can: true, hold: r && r.can ? r.hold : 0, need: r && r.need, hint: (r && r.can ? r.hint + '   ' : '') + `CLICK: PUT THE ${carriedName(carry)} IN STORAGE` };
+    return { id: 'store', click: true, can: true, hold: r && r.can ? r.hold : 0, need: r && r.need, game: r && r.can ? r.game : null, name: 'STORAGE', hint: (r && r.can ? r.hint + '   ' : '') + `CLICK: PUT THE ${carriedName(carry)} IN STORAGE` };
   }
   if (dist(h, WHEEL_POS) < WHEEL_R + 3 && !carry) return { id: 'wheel', hint: 'HOLD LMB + CIRCLE: SPIN THE BAY WHEEL (clockwise opens)', grip: true, can: true };
   if (dist(h, CRANK_POS) < CRANK_R + 4 && !carry) return { id: 'crank', hint: 'HOLD LMB + CIRCLE: AIR CRANK', grip: true, can: true };
@@ -888,7 +1040,7 @@ function handTarget() {
     if (engine.report === 'malfunction') {
       // A malfunction is real damage: it needs a metal part (free at the dock)
       const r = repair('engine', 'ENGINE', 'METAL');
-      return r.can ? { ...r, hold: docked ? DOCK_REPAIR_TIME : RESTART_MALFUNCTION, hint: r.hint.replace('REPAIR ENGINE', 'FIX + RESTART ENGINE') } : r;
+      return r.can ? { ...r, rivets: RIVETS + 1, hint: r.hint.replace('REPAIR ENGINE', 'FIX + RESTART ENGINE') } : r;
     }
     return { id: 'engine', hint: 'HOLD E: RESTART ENGINE', hold: RESTART_PREVENTION, can: true };
   }
@@ -899,7 +1051,7 @@ function handTarget() {
     if (!m) return { id: 'slot', hint: `${SLOTS[si].name} SLOT EMPTY`, can: false };
     const r = m.broken || m.worn ? repair('slot' + si, m.id, PART_FOR[m.id]) : null;
     if (carry) return r || { id: 'slot', hint: 'HANDS FULL', can: false };
-    return { id: 'slot' + si, slot: si, click: true, can: true, hold: r && r.can ? r.hold : 0, need: r && r.need,
+    return { id: 'slot' + si, slot: si, click: true, can: true, hold: r && r.can ? r.hold : 0, need: r && r.need, game: r && r.can ? r.game : null, name: m.id,
       hint: (r ? r.hint + '   ' : '') + `CLICK: TAKE ${m.id} OUT` };
   }
   if (!carry && inStorageArea(h)) {
@@ -932,8 +1084,8 @@ function holdAction(t) {
   // Used-up part leaves the hand
   if (t.need && phase !== 'dock' && isItem(carry) && carry.type === t.need) { items.splice(items.indexOf(carry), 1); carry = null; }
   if (id === 'vent') return ventCanister();
-  if (id === 'engine') { engine.state = 'running'; engine.report = null; log('ENGINE RESTARTED', 'good'); tone(660, 0.08); tone(990, 0.12, 0.1); return; }
-  if (id === 'breaker') { gen.on = !gen.on; if (gen.on) gen.boot = BOOT_TIME; else log('POWER CUT', 'warn'); tone(120, 0.2, 0, 'square', 0.08); return; }
+  if (id === 'engine') { engine.state = 'running'; engine.report = null; log('ENGINE RESTARTED', 'good'); SFX.starter(); return; }
+  if (id === 'breaker') { gen.on = !gen.on; if (gen.on) gen.boot = BOOT_TIME; else log('POWER CUT', 'warn'); SFX.breaker(); return; }
   // Repairs clear both stages (damaged and broken)
   if (id === 'panel') { parts.panel.broken = parts.panel.worn = false; frozenThrottle = null; snapshot = null; log('PANEL REPAIRED', 'good'); }
   else if (id === 'pumpMech') { parts.pumpMech.broken = parts.pumpMech.worn = false; log('PUMP REPAIRED', 'good'); }
@@ -946,19 +1098,19 @@ function clickAction(t) {
   if (t.id === 'install') {
     const other = moduleIn(t.slot);
     carry.slot = t.slot; carry.carried = false; log(`${carry.id} -> ${SLOTS[t.slot].name} SLOT`, 'good');
-    carry = null; bucket();
+    carry = null; bucket(); SFX.clunk(); if (phase === 'dive') SFX.gush();
     if (other) { other.slot = -1; other.carried = true; carry = other; }
   } else if (t.id === 'store') {
     if (isItem(carry)) { carry.where = 'storage'; log(`${ITEM_TYPES[carry.type].short} STORED`, 'good'); }
     else { carry.slot = -1; carry.carried = false; log(`${carry.id} STORED`, 'good'); }
-    carry = null;
+    carry = null; SFX.clunk();
   }
-  else if (t.id === 'storage') { inv.open = true; mouse.down = false; }
-  else if (t.id === 'pickup') { t.it.where = 'hand'; carry = t.it; }
-  else if (t.id === 'drop' || t.id === 'vent') { carry.where = 'floor'; carry.x = clamp(hand.x, WALK_X[0], 100); carry.vx = fig.vx; carry = null; }
+  else if (t.id === 'storage') { inv.open = true; mouse.down = false; SFX.squeak(); }
+  else if (t.id === 'pickup') { t.it.where = 'hand'; carry = t.it; SFX.clink(); }
+  else if (t.id === 'drop' || t.id === 'vent') { carry.where = 'floor'; carry.x = clamp(hand.x, WALK_X[0], 100); carry.vx = fig.vx; carry = null; SFX.drop(); }
   else if (t.id.startsWith('slot')) {
     const m = moduleIn(t.slot);
-    m.slot = -1; m.carried = true; carry = m; bucket(); log(`TOOK ${m.id} OUT`, 'warn');
+    m.slot = -1; m.carried = true; carry = m; bucket(); SFX.clunk(); if (phase === 'dive') SFX.gush(); log(`TOOK ${m.id} OUT`, 'warn');
   }
 }
 // E while the storage window is open closes it
@@ -971,6 +1123,77 @@ function updateHold(dt) {
   if (hold.id !== t.id) { hold.id = t.id; hold.t = 0; }
   if ((hold.t += dt) >= t.hold) { holdAction(t); hold.id = null; hold.t = 0; hold.lock = true; }
 }
+// ----- Repair minigames (mid-dive; docked repairs stay a quick hold) -----
+// METAL: hammer the rivets in time. PIPE: screw the compression fitting tight. FILTER: line the cartridge up and push.
+// Getting knocked down, walking off or pressing ESC stops it; progress is kept until you finish (or dock).
+const GAME_FOR = { METAL: 'rivet', PIPE: 'screw', FILTER: 'filter' };
+let fix = null, fixSaved = {};
+function startFix(t) {
+  const saved = fixSaved[t.id];
+  fix = { id: t.id, name: t.name, game: t.game, total: t.rivets || RIVETS, prog: saved && saved.game === t.game ? saved.prog : 0,
+          pos: 0, dir: 1, zone: 0.25 + Math.random() * 0.5, flash: 0, miss: 0, lastA: null, tick: 0, guide: 0.5, fx: 0.5, on: false, push: false };
+  hold.lock = true; grip = null;
+}
+function stopFix(why) {
+  if (!fix) return;
+  fixSaved[fix.id] = { game: fix.game, prog: fix.prog };
+  if (why) log(`REPAIR STOPPED (${why}) - PROGRESS KEPT`, 'warn');
+  fix = null;
+}
+function finishFix() {
+  const id = fix.id;
+  delete fixSaved[id]; fix = null;
+  const t = handTarget();
+  if (t && t.id === id && t.game) { holdAction(t); SFX.fixed(); }
+}
+// Rivets: E or a click when the marker is in the green
+function fixPress() {
+  if (!fix || fix.game !== 'rivet') return;
+  if (Math.abs(fix.pos - fix.zone) < RIVET_ZONE / 2) {
+    fix.prog++; fix.flash = 0.25; SFX.hammer(); kick(2, 0);
+    fix.zone = 0.15 + Math.random() * 0.7;
+    if (fix.prog >= fix.total) finishFix();
+  } else { fix.miss = 0.3; SFX.miss(); }
+}
+function updateFix(dt) {
+  if (!fix) return;
+  if (sub.dead || mode !== 'standing') return stopFix(null);
+  if (fig.stun > 0) return stopFix('KNOCKED OFF');
+  if (keys.KeyA || keys.KeyD || keys.ArrowLeft || keys.ArrowRight) return stopFix(null);
+  const t = handTarget();
+  if (!t || t.id !== fix.id || t.game !== fix.game) return stopFix(null);
+  fix.flash = Math.max(0, fix.flash - dt); fix.miss = Math.max(0, fix.miss - dt);
+  const L = fixLayout();
+  if (fix.game === 'rivet') {
+    fix.pos += fix.dir * RIVET_SPEED * (1 + fix.prog * 0.2) * dt;
+    if (fix.pos > 1) { fix.pos = 2 - fix.pos; fix.dir = -1; } else if (fix.pos < 0) { fix.pos = -fix.pos; fix.dir = 1; }
+  } else if (fix.game === 'screw') {
+    // Circle the mouse clockwise around the nut; counter-clockwise backs it off
+    const dx = mouse.x - L.nx, dy = mouse.y - L.ny;
+    if (Math.hypot(dx, dy) > 14) {
+      const a = Math.atan2(dy, dx);
+      if (fix.lastA !== null) {
+        const d = Math.atan2(Math.sin(a - fix.lastA), Math.cos(a - fix.lastA)), before = Math.floor(fix.prog * SCREW_TURNS * 12);
+        fix.prog = clamp(fix.prog + d / (Math.PI * 2 * SCREW_TURNS), 0, 1);
+        if (Math.floor(fix.prog * SCREW_TURNS * 12) !== before) SFX.ratchet();
+      }
+      fix.lastA = a;
+    } else fix.lastA = null;
+    if (fix.prog >= 1) finishFix();
+  } else {
+    // The slot's guide drifts about; keep the cartridge (mouse x) under it and hold E to push it in
+    fix.guide = 0.5 + 0.32 * Math.sin(time * 1.2 + Math.sin(time * 0.7) * 2);
+    fix.fx = clamp((mouse.x - L.tx) / L.tw, 0, 1);
+    fix.push = !!keys.KeyE; fix.on = Math.abs(fix.fx - fix.guide) < FILTER_SLACK;
+    if (fix.push && fix.on) { fix.prog += dt / FILTER_TIME; if ((fix.tick -= dt) <= 0) { SFX.slide(); fix.tick = 0.12; } }
+    else if (fix.push) { fix.prog = Math.max(0, fix.prog - dt * 0.3); fix.miss = 0.15; if ((fix.tick -= dt) <= 0) { SFX.scrape(); fix.tick = 0.15; } }
+    if (fix.prog >= 1) finishFix();
+  }
+}
+const fixLayout = () => {
+  const W = cv.width, H = cv.height, w = Math.min(380, W - 32), h = 170, x = (W - w) / 2, y = Math.min(H - h - 16, H * 0.6);
+  return { x, y, w, h, tx: x + 30, tw: w - 60, nx: W / 2, ny: y + 92 };
+};
 // Loose items on the floor slide with the sub's tilt and get thrown about by hits
 function updateItems(dt) {
   for (const it of items) {
@@ -990,8 +1213,14 @@ function updateGrip() {
   const a = Math.atan2(hand.y - c[1], hand.x - c[0]);
   if (grip.last !== null && dist(hand, c) > 2) {
     const d = Math.atan2(Math.sin(a - grip.last), Math.cos(a - grip.last));
-    if (grip.id === 'wheel') hatch.progress = clamp(hatch.progress + d / (Math.PI * 2 * HATCH_TURNS), 0, 1);
-    else if (Math.abs(d) > 0.01) { crank.ang += d; crank.lastT = time; }
+    if (grip.id === 'wheel') {
+      const before = Math.floor(hatch.progress * HATCH_TURNS * 16);
+      hatch.progress = clamp(hatch.progress + d / (Math.PI * 2 * HATCH_TURNS), 0, 1);
+      if (Math.floor(hatch.progress * HATCH_TURNS * 16) !== before) SFX.ratchet();
+    } else if (Math.abs(d) > 0.01) {
+      if (Math.floor((crank.ang + d) / 1.6) !== Math.floor(crank.ang / 1.6)) SFX.squeak();
+      crank.ang += d; crank.lastT = time;
+    }
   }
   grip.last = a;
 }
@@ -1009,7 +1238,9 @@ function updateFigure(dt) {
     const tv = h * WALK_SPEED * wade;
     fig.vx += clamp(tv - fig.vx, -WALK_ACCEL * dt, WALK_ACCEL * dt);
   }
+  const stepBefore = Math.floor(fig.walk * 10 / Math.PI);
   fig.x += fig.vx * dt; fig.walk += Math.abs(fig.vx) / WALK_SPEED * dt;
+  if (Math.floor(fig.walk * 10 / Math.PI) !== stepBefore && Math.abs(fig.vx) > 8) SFX.step(water > 0.02 && waterLineLocal() < footY(fig.x) - 1);
   if (fig.x < WALK_X[0] || fig.x > WALK_X[1]) fig.vx = 0;
   fig.x = clamp(fig.x, WALK_X[0], WALK_X[1]);
 }
@@ -1111,11 +1342,6 @@ function updateSub(dt) {
   sub.angV += (target - sub.ang) * ROT_STIFFNESS / mass() * dt;
   sub.angV *= Math.exp(-ROT_DAMPING * dt);
   sub.ang += sub.angV * dt;
-  if (hum && actx) {
-    const on = power() ? 1 : 0, t = Math.hypot(throttle.x, throttle.y);
-    hum.o.frequency.setTargetAtTime(45 + 70 * t, actx.currentTime, 0.05);
-    hum.g.gain.setTargetAtTime(on * (0.015 + 0.035 * t), actx.currentTime, 0.1);
-  }
 }
 
 // ===================== ROBOT ARM + LOOT =====================
@@ -1135,7 +1361,7 @@ function updateArm(dt) {
         h.state = 'gone';
         items.push({ type: h.type, where: 'floor', x: 25 + Math.random() * 35, vx: (Math.random() - 0.5) * 40 });
         log(`${ITEM_TYPES[h.type].name} ON THE FLOOR`, 'good');
-      } else h.state = 'rising';
+      } else { h.state = 'rising'; SFX.inflate(); }
       arm.held = null;
     }
     return updateBalloons(dt);
@@ -1170,20 +1396,22 @@ function fireHorn() {
   if (h.slot < 0 || h.carried) return log('NO HORN MODULE INSTALLED', 'warn');
   if (h.broken) return log('HORN MODULE BROKEN', 'bad');
   if (canisters() <= 0) return log('HORN: NO GAS CANISTERS IN STORAGE', 'bad');
-  items.splice(items.findIndex(i => i.where === 'storage' && i.type === 'CANISTER'), 1);
+  // Uses the fullest canister; a half-leaked one gives a weaker blast
+  const can = storedCanisters().reduce((a, b) => b.gas > a.gas ? b : a), power = Math.max(0.3, can.gas);
+  items.splice(items.indexOf(can), 1);
   const o = subPoint(SLOTS[h.slot].c), a = slotFacing(h.slot);
   // Did the cone catch the creature? It gets shoved when the wave reaches it.
   const dx = creature.x - o.x, dy = creature.y - o.y, d = Math.hypot(dx, dy) || 1;
   const off = Math.abs(Math.atan2(Math.sin(Math.atan2(dy, dx) - a), Math.cos(Math.atan2(dy, dx) - a)));
-  const hit = d < HORN_RANGE + CREATURE_SIZE / 2 && off < HORN_ARC ? { dx: dx / d, dy: dy / d, d: Math.max(0, d - CREATURE_SIZE / 2) } : null;
+  const hit = d < HORN_RANGE + CREATURE_SIZE / 2 && off < HORN_ARC ? { dx: dx / d, dy: dy / d, d: Math.max(0, d - CREATURE_SIZE / 2), power } : null;
   hornWaves.push({ x: o.x, y: o.y, a, t: time, hit });
   sub.vx -= Math.cos(a) * HORN_RECOIL; sub.vy -= Math.sin(a) * HORN_RECOIL;
-  kick(SHAKE_WALL, 0); tone(55, 0.6, 0, 'sawtooth', 0.15); tone(110, 0.3, 0, 'square', 0.06);
+  kick(SHAKE_WALL, 0); SFX.horn();
   log(`HORN FIRED (${canisters()} CANISTERS LEFT)`, 'warn');
 }
 function updateHorn(dt) {
   for (const w of hornWaves) {
-    if (w.hit && (time - w.t) * HORN_SPEED >= w.hit.d) { creature.vx += w.hit.dx * HORN_PUSH; creature.vy += w.hit.dy * HORN_PUSH; w.hit = null; }
+    if (w.hit && (time - w.t) * HORN_SPEED >= w.hit.d) { creature.vx += w.hit.dx * HORN_PUSH * w.hit.power; creature.vy += w.hit.dy * HORN_PUSH * w.hit.power; w.hit = null; }
   }
   hornWaves = hornWaves.filter(w => (time - w.t) * HORN_SPEED < HORN_RANGE);
   // Shoved creature slides to a stop, then creeps back home
@@ -1208,16 +1436,26 @@ function drawHornWaves(S, k) {
 }
 // Open a carried gas canister's valve: emergency air (the canister is used up)
 function ventCanister() {
+  const gas = carry.gas ?? 1;
   items.splice(items.indexOf(carry), 1); carry = null;
-  air = Math.min(1, air + CHARGE_AIR);
-  tone(300, 0.5, 0, 'triangle', 0.05); log(`VENTED A CANISTER: +${Math.round(CHARGE_AIR * 100)}% AIR`, 'good');
+  air = Math.min(1, air + CHARGE_AIR * gas);
+  SFX.vent(); log(`VENTED A CANISTER: +${Math.round(CHARGE_AIR * 100)}% AIR`, 'good');
 }
 
+// Broken storage: the canister rack is cracked and the stored canisters bleed out one at a time into the cabin
+// (a bit of free air, but you lose horn blasts you didn't choose to spend). Patching the storage stops it.
+function updateCanisters(dt) {
+  if (!storageLeaking()) return;
+  const c = storedCanisters().reduce((a, b) => b.gas < a.gas ? b : a);   // the one already leaking
+  const d = Math.min(c.gas, dt / CANISTER_LEAK_TIME);
+  c.gas -= d; air = Math.min(1, air + CHARGE_AIR * d);
+  if (c.gas <= 0.001) { items.splice(items.indexOf(c), 1); log(`A GAS CANISTER LEAKED EMPTY (${canisters()} LEFT)`, 'bad'); }
+}
 function updateBalloons(dt) {
   for (const r of relics) {
     if (r.state !== 'rising') continue;
     r.y -= BALLOON_SPEED * dt;
-    if (r.y < -50) { r.state = 'gone'; coins += r.value; log(`RELIC SOLD +${r.value}`, 'good'); }
+    if (r.y < -50) { r.state = 'gone'; coins += r.value; log(`RELIC SOLD +${r.value}`, 'good'); SFX.sold(); }
   }
 }
 
@@ -1299,6 +1537,7 @@ function firePing() {
     noise.push({ dx: Math.cos(a), dy: Math.sin(a), dist: Math.random() * MURK_RADIUS, echoed: false, kind: 'rock', noise: true });
   }
   pings.push({ x: o.x, y: o.y, t: time, rays, noise });
+  SFX.ping();
 }
 // All-around ping from the middle of the hull: a full ring, coarse and crude
 function fireOmni() {
@@ -1312,7 +1551,7 @@ function fireOmni() {
     noise.push({ dx: Math.cos(a), dy: Math.sin(a), dist: Math.random() * MURK_RADIUS, echoed: false, kind: 'rock', noise: true });
   }
   pings.push({ x: o.x, y: o.y, t: time, rays, noise, omni: true });
-  tone(140, 0.35, 0, 'sine', 0.05);
+  SFX.omni();
 }
 // Bad hardware smears each return ALONG the surface it hit (big error) and barely into it (tiny error),
 // so walls read as a thin, wobbly outline instead of a filled band.
@@ -1346,6 +1585,9 @@ function updateSonar(dt) {
     const dx = home.x - e.x, dy = home.y - e.y, d = Math.hypot(dx, dy), step = SOUND_SPEED * dt;
     if (d <= Math.max(step, 12)) {
       e.done = true;
+      if (e.kind === 'relic') showTip('loot'); else if (e.kind === 'creature') showTip('creature');
+      if (!e.noise && e.kind === 'creature' && amb.beast <= 0) { SFX.retBeast(); amb.beast = 1.5; }
+      else if (!e.noise && amb.ret <= 0) { SFX.ret(e.bright); amb.ret = 0.09 + Math.random() * 0.08; }
       dots.push({ x: e.hx, y: e.hy, t: time, kind: e.kind, noise: e.noise, bright: e.bright, size: (0.7 + Math.random() * 0.6) * (e.omni ? OMNI_BLOB : 1),
                   fade: e.kind === 'creature' ? CREATURE_DOT_FADE : DOT_FADE_TIME });
     } else { e.x += dx / d * step; e.y += dy / d * step; }
@@ -1367,11 +1609,13 @@ function update(dt) {
   updatePower(dt);
   updateWater(dt);
   updateFigure(dt);
+  updateFix(dt);
   updateHold(dt);
   updateSub(dt);
   updateArm(dt);
   updateHorn(dt);
   updateItems(dt);
+  updateCanisters(dt);
   updateSnow(dt);
   const zt = mode === 'seated' ? 0 : 1;
   zoomT += Math.sign(zt - zoomT) * Math.min(Math.abs(zt - zoomT), dt / ZOOM_TIME);
@@ -1789,6 +2033,14 @@ function waterBody(clipFn, x0, x1, surfAt) {
 // The cabin waterline catches a little light even in the dark, so you can always read how high it is.
 // Drawn after the light map (additive), before the fog.
 function waterSheen() {
+  if (storageLeaking()) {   // gas jetting out of the cracked canister rack (also catches a little light)
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 9; i++) {
+      const k = (time * 1.4 + i / 9) % 1; ctx.fillStyle = `rgba(90,105,110,${0.35 * (1 - k)})`;
+      ctx.beginPath(); ctx.arc(64 + i * 4 + Math.sin(i * 3 + time) * 2, -25 + k * 10, 0.8 + k * 3, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
   if (water <= 0.001) return;
   ctx.save(); poly(CREW_ROOM); ctx.clip(); ctx.globalCompositeOperation = 'lighter';
   ctx.strokeStyle = 'rgba(40,110,130,0.5)'; ctx.lineWidth = 0.8; ctx.beginPath();
@@ -2319,7 +2571,8 @@ function snapshotMonitors() {
 function drawInventory() {
   const W = cv.width, H = cv.height;
   const cards = [...modules.filter(m => m.slot < 0 && !m.carried).map(m => ({ m, label: m.id, sub: m.broken ? 'BROKEN' : 'MODULE', bad: m.broken })),
-                 ...Object.keys(ITEM_TYPES).filter(t => storedOf(t)).map(t => ({ type: t, label: `${ITEM_TYPES[t].short} x${storedOf(t)}`, sub: ITEM_TYPES[t].name }))];
+                 ...Object.keys(ITEM_TYPES).filter(t => storedOf(t)).map(t => ({ type: t, label: `${ITEM_TYPES[t].short} x${storedOf(t)}`,
+                   sub: t === 'CANISTER' && storedCanisters().some(c => c.gas < 0.99) ? 'ONE PART EMPTY' : ITEM_TYPES[t].name }))];
   const cw = 100, w = Math.max(420, 28 + cards.length * (cw + 10)), h = 210, x = (W - w) / 2, y = (H - h) / 2;
   ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, W, H);
   rect([x, y, w, h], '#2a1f10', '#a0601a');
@@ -2340,6 +2593,63 @@ function drawInventory() {
   ctx.textAlign = 'left';
   if (!cards.length) { ctx.fillStyle = '#888'; ctx.fillText('empty', x + 14, y + 110); }
   ctx.fillStyle = '#aaa'; ctx.font = '12px monospace'; ctx.fillText('click something to take it in your hand   -   E / click outside to close', x + 14, y + h - 14);
+}
+// The repair minigame window (screen space, low over the middle of the screen)
+function drawFix() {
+  if (!fix) return;
+  const L = fixLayout(), { x, y, w, h, tx, tw } = L;
+  ctx.save();
+  rect([x, y, w, h], 'rgba(16,14,11,0.94)', fix.miss > 0 ? '#f44' : '#a0601a');
+  ctx.textAlign = 'center'; ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#ffb040';
+  ctx.fillText(`REPAIR: ${fix.name}`, x + w / 2, y + 20);
+  ctx.font = '11px monospace'; ctx.fillStyle = '#bbb';
+  ctx.fillText({ rivet: 'E / CLICK WHEN THE MARKER IS IN THE GREEN', screw: 'CIRCLE THE MOUSE CLOCKWISE AROUND THE NUT',
+                 filter: 'MOUSE: LINE IT UP UNDER THE GAP   HOLD E: PUSH' }[fix.game], x + w / 2, y + 37);
+  if (fix.game === 'rivet') {
+    // The patch plate and its rivets, then the timing bar
+    rect([x + w / 2 - fix.total * 19 - 6, y + 50, fix.total * 38 + 12, 40], fix.flash > 0 ? '#8a8270' : '#5a554a', '#2a2620');
+    for (let i = 0; i < fix.total; i++) {
+      const cx = x + w / 2 + (i - (fix.total - 1) / 2) * 38, cy = y + 70, done = i < fix.prog, cur = i === Math.floor(fix.prog);
+      ctx.beginPath(); ctx.arc(cx, cy, 9, 0, Math.PI * 2);
+      ctx.fillStyle = done ? '#c9c2b0' : '#141210'; ctx.fill();
+      ctx.lineWidth = cur ? 2 : 1; ctx.strokeStyle = cur ? `rgba(255,176,64,${0.5 + 0.5 * Math.sin(time * 8)})` : '#3a352d'; ctx.stroke();
+      if (done) { ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.beginPath(); ctx.arc(cx - 3, cy - 3, 2.5, 0, Math.PI * 2); ctx.fill(); }
+    }
+    const by = y + 104;
+    rect([tx, by, tw, 16], '#1c1c1c', '#555');
+    rect([tx + (fix.zone - RIVET_ZONE / 2) * tw, by, RIVET_ZONE * tw, 16], '#2d7a3a');
+    rect([tx + fix.pos * tw - 2, by - 5, 4, 26], fix.miss > 0 ? '#f44' : '#fff');
+    ctx.fillStyle = '#aaa'; ctx.fillText(`RIVET ${Math.min(fix.prog + 1, fix.total)}/${fix.total}`, x + w / 2, by + 36);
+  } else if (fix.game === 'screw') {
+    // A pipe joint: the nut turns as you circle the mouse; a ring shows how tight it is
+    const { nx, ny } = L;
+    rect([tx, ny - 8, tw, 16], '#3e4a52', '#1c2226');
+    if (fix.prog < 1) { ctx.fillStyle = 'rgba(150,200,220,0.6)'; for (let i = 0; i < 8; i++) { const k = (time * 3 + i / 8) % 1; ctx.fillRect(nx + 26 + k * 40 * (1 - fix.prog), ny - 10 - k * 18 + Math.sin(i * 7) * 6, 2, 2); } }
+    ctx.lineWidth = 6; ctx.strokeStyle = '#2a2a2a'; ctx.beginPath(); ctx.arc(nx, ny, 38, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = '#4c8'; ctx.beginPath(); ctx.arc(nx, ny, 38, -Math.PI / 2, -Math.PI / 2 + fix.prog * Math.PI * 2); ctx.stroke();
+    ctx.save(); ctx.translate(nx, ny); ctx.rotate(fix.prog * SCREW_TURNS * Math.PI * 2);
+    ctx.beginPath(); for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3; ctx.lineTo(Math.cos(a) * 22, Math.sin(a) * 22); } ctx.closePath();
+    ctx.fillStyle = '#8a8f94'; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = '#2a2e32'; ctx.stroke();
+    ctx.fillStyle = '#2a2e32'; ctx.fillRect(-2, -20, 4, 8);   // a mark so you can see it turn
+    ctx.beginPath(); ctx.arc(0, 0, 8, 0, Math.PI * 2); ctx.fillStyle = '#3e4a52'; ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = '#aaa'; ctx.fillText(`${Math.round(fix.prog * 100)}% TIGHT`, x + w / 2, y + h - 26);
+  } else {
+    // The filter housing: a gap in the rail drifts about; the cartridge follows the mouse and rises as you push
+    const ry = y + 52, gx = tx + fix.guide * tw, cw = 2 * FILTER_SLACK * tw * 0.8;
+    rect([tx, ry, tw, 10], '#3a3a3a', '#222');
+    rect([gx - cw / 2, ry, cw, 10], '#050505'); rect([gx - cw / 2 - 2, ry - 3, 2, 16], '#4c8'); rect([gx + cw / 2, ry - 3, 2, 16], '#4c8');
+    const fxp = tx + fix.fx * tw, fy = ry + 14 + (1 - fix.prog) * 46;
+    ctx.save(); ctx.translate(fxp, fy);
+    rect([-cw / 2 + 3, 0, cw - 6, 30], '#3f5a4a', fix.on ? '#4c8' : '#f55');
+    ctx.strokeStyle = 'rgba(190,230,200,0.4)'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let i = -cw / 2 + 8; i < cw / 2 - 4; i += 6) { ctx.moveTo(i, 3); ctx.lineTo(i, 27); } ctx.stroke();
+    ctx.restore();
+    rect([tx, y + h - 36, tw, 6], '#222'); rect([tx, y + h - 36, tw * fix.prog, 6], '#4c8');
+  }
+  ctx.font = '10px monospace'; ctx.fillStyle = '#777';
+  ctx.fillText('A/D or ESC: STOP (PROGRESS IS KEPT)', x + w / 2, y + h - 10);
+  ctx.restore();
 }
 // Little pictures of the loose items (sub-local units, centred on x, y)
 function drawItemIcon(type, x, y) {
@@ -2363,6 +2673,120 @@ function drawItemIcon(type, x, y) {
   ctx.restore();
 }
 
+// ===================== TITLE, CONTROLS, FIRST-TIME TIPS =====================
+let title = location.hash !== '#play', showDebug = false;
+function startGame() { title = false; initAudio(); }
+const CONTROLS = [
+  ['SEATED (AT THE CHAIR)', [['W A S D', 'steer'], ['LMB', 'directional sonar ping'], ['RMB', 'all-around sonar ping'], ['E (hold)', 'robot arm grabs where you aim'],
+                             ['Q', 'horn (one gas canister)'], ['1  2  3', 'sonar / pump / lights'], ['SPACE', 'dive (at the dock)'], ['F', 'stand up']]],
+  ['STANDING', [['A / D', 'walk'], ['MOUSE', 'your hand'], ['LMB', 'grab / click'], ['E', 'use / repair'], ['F', 'sit (by the chair)'], ['ESC', 'close / stop']]],
+  ['ANYTIME', [['H', 'buy hull (dock)'], ['P', 'pay quota (dock)'], ['TAB', 'show controls'], ['ENTER', 'dismiss a tip'], ['M', 'sound on / off'], ['G', 'graphics high / low'], ['`', 'debug readout']]],
+];
+function drawControls(y) {
+  const W = cv.width, cw = Math.min(300, (W - 64) / 3), x0 = (W - cw * 3) / 2;
+  ctx.textAlign = 'left';
+  CONTROLS.forEach(([head, rows], c) => {
+    const x = x0 + c * cw;
+    ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#ffb040'; ctx.fillText(head, x, y);
+    ctx.font = '12px monospace';
+    rows.forEach(([k, v], i) => { ctx.fillStyle = '#e8e0cc'; ctx.fillText(k, x, y + 24 + i * 19); ctx.fillStyle = '#9aa'; ctx.fillText(v, x + 82, y + 24 + i * 19); });
+  });
+}
+function drawTitle() {
+  const W = cv.width, H = cv.height;
+  ctx.fillStyle = 'rgba(1,4,8,0.9)'; ctx.fillRect(0, 0, W, H);
+  const y = Math.max(40, H / 2 - 230);
+  ctx.textAlign = 'center'; ctx.font = 'bold 54px monospace'; ctx.fillStyle = '#9fe6e0';
+  ctx.shadowColor = '#3cc'; ctx.shadowBlur = 24; ctx.fillText('ATLANTIS SUB', W / 2, y + 50); ctx.shadowBlur = 0;
+  ctx.font = '14px monospace'; ctx.fillStyle = '#bcc';
+  ctx.fillText("You're the whole crew. Loot Atlantis, keep this tin can alive, make quota.", W / 2, y + 86);
+  ctx.fillStyle = '#788'; ctx.fillText('Sonar is your only eyes. Everything breaks. Nobody is coming.', W / 2, y + 108);
+  drawControls(y + 160);
+  ctx.textAlign = 'center'; ctx.font = 'bold 16px monospace'; ctx.fillStyle = `rgba(255,176,64,${0.6 + 0.4 * Math.sin(performance.now() / 300)})`;
+  ctx.fillText('CLICK TO START', W / 2, y + 360);
+  ctx.font = '11px monospace'; ctx.fillStyle = '#566'; ctx.fillText('headphones recommended', W / 2, y + 382);
+}
+// Tips: each one shows once (this browser remembers), the first time its situation comes up
+const TIPS = {
+  dock: 'DOCKED. You get 60 s of free repairs here. SPACE dives. Go deeper than 50 m, then come back up to the top to finish a dive. The quota is due every 3 dives.',
+  dock2: 'BACK AT THE DOCK. The hull gets patched for free, but only up to about half. H buys more hull, P pays toward the quota. Broken stuff: stand up and hold E on it (free here).',
+  dive: 'SONAR IS YOUR ONLY EYES. RMB: all-around ping (rough). LMB: directional ping from the sonar module (sharp, but only where its slot faces). WASD steers, F stands you up.',
+  stand: 'STANDING. A/D walk, the mouse is your hand. LMB grabs and clicks, E uses. You only see the way you face. F sits you back down at the chair.',
+  loot: 'YELLOW BLIP = LOOT. Hold E and point at it on the sonar: the arm grabs it. Relics float up on a balloon and pay out. Scrap gets dropped inside.',
+  creature: 'SOMETHING BIG ON SONAR. Touching it wrecks the engine. The horn shoves it away (Q, one gas canister per blast), but the HORN module starts in storage: install it in a slot first.',
+  damaged: "SOMETHING'S DAMAGED (check the terminal). Stand up, open the storage (orange, top right), take the matching part, touch the broken thing, press E. PIPE = pump, FILTER = air generator, METAL = the rest.",
+  floor: 'SCRAP ON THE FLOOR. Stand up, click it to pick it up, click the storage to stow it. Loose parts slide around when the sub tilts.',
+  malfunction: 'MALFUNCTION: the engine room is flooded behind its door. Open it and that water pours into the cabin, so get the pump running first (2 at the terminal).',
+  engine: "ENGINE'S OFF. Walk to the back, spin the yellow wheel (hold LMB, circle the mouse) to open the bay, touch the engine, press E.",
+  water: "WATER COMING IN. Pump it out (2 at the terminal, the pump only works in the floor slot). Over 40% shorts the terminal. Don't let the pump run dry: it blows up.",
+  power: "POWER'S OUT. The terminal dies in 7 s, the lights in 30 s, and without the air generator you have about a minute of air.",
+  air: 'AIR FALLING. The air generator needs power and a slot. The crank on the wall (circle the mouse on it) slows the loss. A gas canister in your hand: hold E for +30% air.',
+  frozen: "PANEL FROZEN. Everything's stuck the way it was, throttle too. Cut the power at the breaker in the engine bay, then fix the panel with a METAL part.",
+  storage: 'STORAGE BROKEN. It won\'t open, and the gas canisters inside are bleeding out. Patch it with a METAL part (loose scrap on the floor counts).',
+  fuel: "FUEL LOW. When it's gone the engine stops for good. Head up.",
+};
+let tipSeen = {}, tipQueue = [], tipNow = null, tipClock = 0;
+try { tipSeen = JSON.parse(localStorage.getItem('atlantisSubTips') || '{}'); } catch (e) {}
+function showTip(id) {
+  if (tipSeen[id] || tipQueue.some(q => q.id === id) || (tipNow && tipNow.id === id)) return;
+  tipQueue.push({ id, at: time });
+}
+function dismissTip() { if (tipNow) tipNow.t = Math.min(tipNow.t, 0.3); }
+function checkTips() {
+  if (sub.dead) return;
+  if (phase === 'dock') showTip(divesDone ? 'dock2' : 'dock');
+  if (phase !== 'dive') return;
+  showTip('dive');
+  if (mode === 'standing') showTip('stand');
+  if (Object.values(parts).some(p => p.worn || p.broken) || modules.some(m => m.worn || m.broken)) showTip('damaged');
+  if (items.some(i => i.where === 'floor')) showTip('floor');
+  if (engine.state === 'off' && engine.report === 'malfunction') showTip('malfunction');
+  if (engine.state === 'off' && engine.report !== 'fuel') showTip('engine');
+  if (water > 0.12) showTip('water');
+  if (!power()) showTip('power');
+  if (air < 0.6 && !airMaking()) showTip('air');
+  if (parts.panel.broken) showTip('frozen');
+  if (parts.storage.broken) showTip('storage');
+  if (fuel < 0.25) showTip('fuel');
+}
+function updateTips(dt) {
+  if ((tipClock -= dt) <= 0) { checkTips(); tipClock = 0.25; }
+  if (tipNow && tipNow.id.startsWith('dock') && phase === 'dive') tipNow.t = Math.min(tipNow.t, 0.3);   // left the dock
+  if (tipNow && (tipNow.t -= dt) <= 0) tipNow = null;
+  tipQueue = tipQueue.filter(q => time - q.at < 15 && !tipSeen[q.id]);   // stale ones (the moment passed) wait for next time
+  if (!tipNow && tipQueue.length) {
+    const id = tipQueue.shift().id;
+    tipNow = { id, text: TIPS[id], t: 5 + TIPS[id].length / 22, age: 0 };
+    tipSeen[id] = true;
+    try { localStorage.setItem('atlantisSubTips', JSON.stringify(tipSeen)); } catch (e) {}
+  }
+  if (tipNow) tipNow.age += dt;
+}
+function wrapText(text, maxW) {
+  const out = []; let line = '';
+  for (const w of text.split(' ')) { const t = line ? line + ' ' + w : w; if (ctx.measureText(t).width > maxW && line) { out.push(line); line = w; } else line = t; }
+  if (line) out.push(line);
+  return out;
+}
+function drawTip() {
+  if (!tipNow || sub.dead) return;
+  const W = cv.width, w = Math.min(600, Math.max(380, W - 700)), x = (W - w) / 2, y = mode === 'seated' ? 54 : 70;
+  ctx.font = '12px monospace'; const lines = wrapText(tipNow.text, w - 28), h = 30 + lines.length * 16;
+  ctx.save(); ctx.globalAlpha = Math.min(1, tipNow.age * 4, tipNow.t * 2);
+  rect([x, y, w, h], 'rgba(12,16,18,0.92)', '#a0601a');
+  ctx.textAlign = 'left'; ctx.fillStyle = '#ffb040'; ctx.font = 'bold 11px monospace'; ctx.fillText('TIP', x + 14, y + 16);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#666'; ctx.font = '10px monospace'; ctx.fillText('ENTER: OK', x + w - 12, y + 16);
+  ctx.textAlign = 'left'; ctx.font = '12px monospace'; ctx.fillStyle = '#dde';
+  lines.forEach((l, i) => ctx.fillText(l, x + 14, y + 34 + i * 16));
+  ctx.restore();
+}
+const DEATH_HINTS = {
+  'SUFFOCATED': 'the air generator needs power and a slot; the crank and gas canisters buy you time',
+  'FLOODED': 'run the pump early, and keep the bay door shut after a malfunction until the pump is going',
+  'HULL IMPLODED': 'slow down near walls, and buy hull at the dock (H)',
+  'QUOTA MISSED': 'pay the quota at the dock (P); the ruins at the bottom pay the most',
+};
+
 // ===================== RENDER =====================
 function bar(x, y, w, f, c, t) {
   ctx.fillStyle = '#222'; ctx.fillRect(x, y, w, 10);
@@ -2376,6 +2800,8 @@ function draw() {
   ctx.fillStyle = monitorsOnly ? '#020509' : '#04101f'; ctx.fillRect(0, 0, W, H);
   if (!monitorsOnly) drawScene(W, H, e);
   drawOverlays(W, H);
+  if (title) drawTitle();
+  else if (keys.Tab) { ctx.fillStyle = 'rgba(1,4,8,0.85)'; ctx.fillRect(0, 0, W, H); drawControls(Math.max(60, H / 2 - 100)); }
 }
 function drawScene(W, H, e) {
   const sk = shakeAmp * (shake / SHAKE_TIME) * (1 + 1.5 * e);
@@ -2410,6 +2836,7 @@ function drawOverlays(W, H) {
     else { drawSonarScreen(L); drawTerminal(L); }
   }
   if (inv.open) drawInventory();
+  drawFix();
   lowAirBlur(W, H);
 
   bar(16, 14, 160, sub.hp / MAX_HP, sub.hp <= HIT_DAMAGE ? '#e44' : '#4c8', `HULL ${sub.hp}`);
@@ -2435,14 +2862,16 @@ function drawOverlays(W, H) {
   ctx.fillText(mode === 'seated' ? 'SEATED' : 'STANDING', W / 2, 40);
   if (mode === 'standing') {
     const t = handTarget();
-    const hint = grip ? (grip.id === 'wheel' ? `CIRCLE THE MOUSE - BAY ${Math.round(hatch.progress * 100)}% OPEN` : 'CIRCLE THE MOUSE TO CRANK AIR')
+    const hint = fix ? 'REPAIRING' : grip ? (grip.id === 'wheel' ? `CIRCLE THE MOUSE - BAY ${Math.round(hatch.progress * 100)}% OPEN` : 'CIRCLE THE MOUSE TO CRANK AIR')
       : t ? t.hint : canSit() ? 'F: SIT' : (fig.x >= SIT_RANGE[0] && fig.x <= SIT_RANGE[1] && seatUnderWater()) ? 'THE SEAT IS UNDER WATER - PUMP IT OUT' : 'A/D: WALK   MOUSE: HAND   E: USE   LMB: GRAB';
     ctx.font = '12px monospace'; ctx.fillStyle = '#ccc'; ctx.fillText(hint, W / 2, 58);
   }
   ctx.font = '12px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = '#7ab';
   const dbg = [`SPD ${Math.hypot(sub.vx, sub.vy).toFixed(0)}`, `CREATURE ${(Math.hypot(sub.x - creature.x, sub.y - creature.y) / 10).toFixed(0)} m`,
     `MODE ${mode}  FIG ${fig.x.toFixed(0)} face ${fig.face}`, `ENGINE ${engine.state}${engine.report ? ' ' + engine.report : ''}`, `RUN ${runTime.toFixed(0)}s  QUOTAS ${quotasMet}`, `GFX ${gfxHigh ? 'HIGH' : 'LOW'} (G)  ${(1000 / frameAvg).toFixed(0)} fps`];
-  dbg.forEach((t, i) => ctx.fillText(t, W - 12, 18 + i * 16));
+  if (showDebug) dbg.forEach((t, i) => ctx.fillText(t, W - 12, 18 + i * 16));
+  else { ctx.fillStyle = '#566'; ctx.fillText(`TAB: CONTROLS${muted ? '   SOUND OFF' : ''}`, W - 12, 18); }
+  drawTip();
 
   if (sub.dead) {
     ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, H / 2 - 60, W, 110);
@@ -2450,6 +2879,7 @@ function drawOverlays(W, H) {
     ctx.fillText(`SUNK: ${failReason}`, W / 2, H / 2 - 15);
     ctx.font = '15px monospace'; ctx.fillStyle = '#fff';
     ctx.fillText(`lasted ${Math.floor(runTime / 60)}:${String(Math.floor(runTime % 60)).padStart(2, '0')}  -  quotas met: ${quotasMet}  -  press R to start over`, W / 2, H / 2 + 20);
+    if (DEATH_HINTS[failReason]) { ctx.fillStyle = '#9aa'; ctx.font = '12px monospace'; ctx.fillText(`next time: ${DEATH_HINTS[failReason]}`, W / 2, H / 2 + 42); }
   }
 }
 
@@ -2460,7 +2890,9 @@ function frame(now) {
   const dt = Math.min((now - last) / 1000, 1 / 30);
   last = now;
   frameDt = dt;
-  update(dt); draw();
+  if (!title) { update(dt); updateTips(dt); }
+  updateAudio(dt);
+  draw();
   requestAnimationFrame(frame);
 }
 resize(); buildTextures(); reset(); requestAnimationFrame(frame);
