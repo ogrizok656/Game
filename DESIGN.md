@@ -85,6 +85,9 @@ Control panel failure: everything freezes in its current state (systems, screens
 
 ## Sonar, creatures
 - Sonar is the only sense. Drains fuel, only way to find loot.
+- Two sonars (like Barotrauma's active / directional):
+  - All-around ping (RMB): built into the hull, no module needed. Full 360 degrees from the middle of the hull, but crude: coarse rays, returns smeared ~9 px off the walls (up to ~25), more dropout, fuzzier blobs, longer cooldown (1.6 s), more fuel per ping. Tells you where the walls are, not the details.
+  - Directional wave (LMB): the sonar module. A narrow cone out of its slot's side, sharp (~2 px off the walls) and bright. The way to actually read shapes and spot loot.
 - World invisible until a ping hits it. Dots fade (rock 6 s, creature 9 s). Limited range.
 - Look (Barotrauma-style): only the outer skin of walls shows, as soft additive glow blobs. The hardware's position error smears returns ALONG the surface, barely into it, so walls read as a thin wobbly outline. Fresh returns bloom cyan-green and cool to blue as they fade; repeatedly pinged walls burn in brighter. Dark teal glass with grain and scanlines, beige rim with tick marks.
 - Sonar module is directional: it can only aim within the arc its slot faces.
