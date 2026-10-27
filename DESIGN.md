@@ -15,6 +15,14 @@ You are a lone captain in a small sub sent to loot Atlantis. Barotrauma's floodi
 Skeleton to show systems. One hardcoded level, one stationary creature, endless rising quota. Success = how long you stay alive and keep up with the quota.
 Cut for now: surface ship and launch, procedural levels, rescue call, shop menus, roaming creature AI, scan-triggered spawns, horn shockwave.
 
+## Look (interior)
+Grim submarine, not a cartoon. All textures are currently procedural (see CREDITS.md); every texture goes through one pipeline: desaturate to ~30%, multiply by dark teal-grey #1a2a33, low-frequency grime.
+- Surfaces: riveted wall plating (cabin), rusty plating (engine room), exterior hull plates with weld seams, floor grating, diamond treadplate walkway.
+- Props drawn in code and kept dark: pipes with flanges, structural ribs, hanging cables, vent, ceiling tube fixtures, hazard stripe bands on the door frame, storage and engine bay, a crate. Equipment keeps its sketch color (purple engine, green panel, orange storage, blue pump, red slots, yellow door) but darkened.
+- Lighting: a light map multiplied over the sub. Dim ambient fill per room, flickering fluorescent tubes with soft cones (the engine room one flickers worse), green/cyan screen light from the panel, violet/warm engine glow while running, red strobe in damaged rooms. Power out: red emergency strobe for 30 s, then pitch dark with only the bay wheel glowing. The engine room is always darker and redder.
+- Post: bloom on light sources, blue-green grade (folded into the light map), thick vignette, film grain. Marine snow drifts outside the hull.
+- Screens, labels, gauges, the sonar and the terminal are drawn in code.
+
 ## The level: the trench
 One fixed level, generated from a fixed seed (identical every run). About 550 m deep.
 - A wide mouth at the top with a floating boulder, narrowing into a jagged trench with overhanging ledges.
