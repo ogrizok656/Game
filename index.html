@@ -689,6 +689,7 @@ addEventListener('keydown', e => {
     if (e.code === 'KeyP') payQuota();
     if (mode === 'seated' && ['Digit1', 'Digit2', 'Digit3'].includes(e.code)) toggleSystem(['sonar', 'pump', 'lights'][+e.code[5] - 1]);
     if (e.code === 'KeyQ') fireHorn();
+    if (e.code === 'KeyG') toggleGfx();
     if (e.code === 'KeyR' && sub.dead) reset();
   }
   keys[e.code] = true;
@@ -1453,7 +1454,7 @@ function pipe(x0, y0, x1, y1, r, step = 22) {
 }
 // Hanging cable between two points (a little sag, sways with the sub)
 function cable(x0, y0, x1, y1, sag) {
-  const sw = Math.sin(time * 1.3 + x0) * 0.6 - sub.vx * 0.004;
+  const sw = 0;
   ctx.strokeStyle = '#0d1114'; ctx.lineWidth = 0.7;
   ctx.beginPath(); ctx.moveTo(x0, y0); ctx.quadraticCurveTo((x0 + x1) / 2 + sw, Math.max(y0, y1) + sag, x1, y1); ctx.stroke();
 }
@@ -1467,31 +1468,34 @@ function paintedBox(pts, paint, alpha = 0.55) {
 }
 const boxPts = ([x, y, w, h]) => [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
 
-function drawSub() {
-  const blink = sub.hullImm > 0.6 && Math.floor(time * 15) % 2 === 0;
-  ctx.save(); ctx.translate(sub.x, sub.y); ctx.rotate(visAng());
+// The sub is drawn in two layers:
+//  - drawSubStatic(): everything that never changes (hull plating, walls, ribs, pipes, props, equipment bodies).
+//    Rendered ONCE into an offscreen image at the standing zoom (rebuilt only when the window size changes).
+//  - drawSub(): blits that image, then draws only what moves or changes state on top.
+const SUBL_BOX = [-126, -62, 252, 128];   // sub-local area the cached layer covers
+let subLayer = null;
+const subLayerScale = () => Math.min(ZOOM_STANDING, cv.width * 0.85 / 240, cv.height * 0.75 / 130);
+function buildSubLayer() {
+  const sc = subLayerScale(), [bx, by, bw, bh] = SUBL_BOX, c = makeCanvas(Math.ceil(bw * sc), Math.ceil(bh * sc));
+  const keep = ctx; ctx = c.getContext('2d');
+  ctx.setTransform(sc, 0, 0, sc, -bx * sc, -by * sc);
+  drawSubStatic();
+  ctx = keep;
+  subLayer = { c, sc };
+}
+function drawSubStatic() {
   ctx.lineJoin = 'round';
-
-  // --- Propeller: shaft + disc, blades blur while spinning
-  const pr = parts.propeller;
+  // --- Propeller shaft (the disc spins, so it's drawn live)
   pipe(PROP_POS[0], 1, PROP_POS[0], PROP_POS[1] - 13, 2.6, 6);
-  ctx.beginPath(); ctx.ellipse(PROP_POS[0], PROP_POS[1], 12, 15, 0, 0, Math.PI * 2);
-  ctx.fillStyle = pr.broken ? '#2a2224' : pr.bumps ? '#5a4650' : '#4a3d5c'; ctx.fill(); ctx.strokeStyle = '#07080a'; ctx.lineWidth = 1.2; ctx.stroke();
-  ctx.strokeStyle = 'rgba(160,140,190,0.35)'; ctx.lineWidth = 1.2;
-  if (!pr.broken) for (let i = 0; i < 3; i++) { const a = propAng + i * 2.09; ctx.beginPath(); ctx.ellipse(PROP_POS[0], PROP_POS[1], 10 * Math.abs(Math.cos(a)), 13, 0, 0, Math.PI * 2); ctx.stroke(); }
-  ctx.beginPath(); ctx.ellipse(PROP_POS[0], PROP_POS[1], 4.5, 6, 0, 0, Math.PI * 2); ctx.fillStyle = '#20182a'; ctx.fill();
-
   // --- Exterior hull: plating texture, dark outline, cold rim highlight along the top edge
   poly(HULL_OUTLINE); ctx.fillStyle = TEX.hull; ctx.fill();
-  if (blink) { ctx.fillStyle = 'rgba(255,60,40,0.35)'; ctx.fill(); }
   ctx.strokeStyle = '#05070a'; ctx.lineWidth = 1.6; ctx.stroke();
   ctx.strokeStyle = 'rgba(150,190,200,0.35)'; ctx.lineWidth = 0.6;
   ctx.beginPath(); ctx.moveTo(-119, -50.3); ctx.lineTo(105.5, -50.3); ctx.lineTo(111.5, -39.5); ctx.stroke();
-
   // --- Rooms: walls (cabin = teal plating, engine room = rusty and redder)
   poly(CREW_ROOM); ctx.fillStyle = TEX.wall; ctx.fill();
   ctx.fillStyle = TEX.engine; ctx.fillRect(...ENGINE_ROOM);
-  if (hatch.progress > 0.02) { ctx.fillStyle = TEX.wall; ctx.fillRect(DOOR_GAP[0], doorOpenTo(), DOOR_GAP[2], 3 - doorOpenTo()); }
+  ctx.fillStyle = TEX.wall; ctx.fillRect(...DOOR_GAP);   // the doorway (the door slab is drawn live over it)
   ctx.save(); roomsPathOn(ctx); ctx.clip();
   // Structural ribs
   for (const x of [-96, -70, 12, 44, 76]) {
@@ -1499,20 +1503,18 @@ function drawSub() {
     ctx.fillStyle = 'rgba(140,170,180,0.12)'; ctx.fillRect(x - 2.5, -60, 0.6, 120);
     ctx.fillStyle = '#5d6b72'; for (let y = -50; y < 50; y += 7) { ctx.beginPath(); ctx.arc(x, y, 0.5, 0, Math.PI * 2); ctx.fill(); }
   }
-  // Ceiling shadow band + floor-level grime
+  // Ceiling shadow bands + floor-level grime
   let gr = ctx.createLinearGradient(0, -36, 0, -26); gr.addColorStop(0, 'rgba(0,0,0,0.55)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = gr; ctx.fillRect(-35, -36, 150, 10);
   gr = ctx.createLinearGradient(0, -45, 0, -36); gr.addColorStop(0, 'rgba(0,0,0,0.6)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = gr; ctx.fillRect(...ENGINE_ROOM.slice(0, 2), ENGINE_ROOM[2], 9);
+  ctx.fillStyle = gr; ctx.fillRect(ENGINE_ROOM[0], ENGINE_ROOM[1], ENGINE_ROOM[2], 9);
   gr = ctx.createLinearGradient(0, 25, 0, 41); gr.addColorStop(0, 'rgba(10,6,2,0)'); gr.addColorStop(1, 'rgba(10,6,2,0.5)');
   ctx.fillStyle = gr; ctx.fillRect(-40, 25, 150, 16);
   // Pipes along the ceilings, a riser on the back wall, pipes in the engine room
   pipe(-34, -32.6, 46, -32.6, 1.5); pipe(-30, -29.6, 30, -29.6, 1);
   pipe(30, -29.6, 30, -10, 1); pipe(-6, -32.6, -6, -2, 1.2, 14);
   pipe(-110, -41, -52, -41, 1.4); pipe(-88, -41, -88, -38, 1.2, 99); pipe(-66, -8, -50, -8, 1.6);
-  // Brackets holding the ceiling pipes
   ctx.fillStyle = '#11171b'; for (const x of [-20, 4, 26, 40]) ctx.fillRect(x - 0.5, -36, 1, 4);
-  // Cables sagging between the pipes
   cable(-28, -31, -8, -31, 4); cable(2, -31, 22, -30, 3); cable(-108, -40, -92, -40, 3);
   // Vent on the back wall + a crate in the engine room corner
   ctx.drawImage(TEX.vent, 8, -24, 14, 9);
@@ -1526,11 +1528,65 @@ function drawSub() {
   for (let x = -37; x <= 107; x += 2) ctx.lineTo(x, footY(Math.max(WALK_X[0] - 13, x)));
   ctx.lineTo(107, 45); ctx.lineTo(6, 45); ctx.lineTo(-11, 37); ctx.lineTo(-27, 19); ctx.lineTo(-40, 6); ctx.closePath();
   ctx.fillStyle = TEX.tread; ctx.fill(); ctx.strokeStyle = 'rgba(160,190,200,0.25)'; ctx.lineWidth = 0.5; ctx.stroke();
-  // Engine room floor: grating
   ctx.fillStyle = TEX.grate; ctx.fillRect(ENGINE_ROOM[0], -5, ENGINE_ROOM[2], 3);
-  // Room outlines
   ctx.strokeStyle = '#030405'; ctx.lineWidth = 1; poly(CREW_ROOM); ctx.stroke(); ctx.strokeRect(...ENGINE_ROOM);
+  ctx.font = '3.6px monospace'; ctx.textAlign = 'center';
+  // --- Engine housing with gauge faces (needles are live)
+  paintedBox(boxPts(ENGINE_BOX), '#33204a', 0.5);
+  for (const [x, y, r] of ENGINE_GAUGES) { ctx.fillStyle = '#120c18'; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#5c4870'; ctx.lineWidth = 0.6; ctx.stroke(); }
+  pipe(-64, -32, -54, -32, 1.2, 99);
+  label('ENGINE', -82, -36, '#9a8aa8');
+  // --- Breaker box (lever is live)
+  paintedBox(boxPts([BREAKER_POS[0] - 3, BREAKER_POS[1] - 4, 6, 8]), '#1d2226', 0.4);
+  label('BRK', BREAKER_POS[0], BREAKER_POS[1] - 5, '#7d8a92');
+  // --- Hazard frame over the doorway
+  hazardBand(DOOR_GAP[0] - 1, -27, DOOR_GAP[2] + 2, 2);
+  // --- Storage locker, panel console, pump (state overlays are live)
+  paintedBox(STORAGE_POLY, '#7a4a14', 0.5);
+  hazardBand(58, -26.6, 46, 1.6);
+  paintedBox(PANEL_POLY, '#1f4426', 0.5);
+  ctx.strokeStyle = '#3fa060'; ctx.lineWidth = 0.4; poly(PANEL_POLY); ctx.stroke();
+  label('PANEL', 95, 30, '#5a8a66');
+  paintedBox(boxPts(PUMP_BOX), '#1d2850', 0.45);
+  ctx.drawImage(TEX.vent, PUMP_BOX[0] + 2, PUMP_BOX[1] + 1.5, 9, 5);
+  label('PUMP', 20.5, 47.5, '#7a8ab8');
+  label('AIR CRANK', CRANK_POS[0], CRANK_POS[1] + 11, '#6a7a82');
+  // --- Module slot frames: dark red hatches with bolts (modules are live)
+  for (const s of SLOTS) {
+    ctx.save(); ctx.translate(...s.c); ctx.rotate(s.ang);
+    rect([-s.w / 2 - 0.8, -s.h / 2 - 0.8, s.w + 1.6, s.h + 1.6], '#0a0b0c');
+    paintedBox(boxPts([-s.w / 2, -s.h / 2, s.w, s.h]), '#5a1414', 0.35);
+    ctx.fillStyle = '#a8a39a';
+    for (const [x, y] of [[-s.w / 2 + 1.2, -s.h / 2 + 1.2], [s.w / 2 - 1.2, -s.h / 2 + 1.2], [-s.w / 2 + 1.2, s.h / 2 - 1.2], [s.w / 2 - 1.2, s.h / 2 - 1.2]]) { ctx.beginPath(); ctx.arc(x, y, 0.5, 0, Math.PI * 2); ctx.fill(); }
+    ctx.restore();
+  }
+  // --- Chair: dark padded seat facing the panel
+  ctx.fillStyle = '#15191c';
+  ctx.beginPath(); ctx.moveTo(37, -10); ctx.lineTo(41, -11); ctx.lineTo(48, 33); ctx.lineTo(44, 34); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(46, 24); ctx.lineTo(74, 23); ctx.lineTo(76, 31); ctx.lineTo(46, 35); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(150,175,185,0.25)'; ctx.lineWidth = 0.5;
+  ctx.beginPath(); ctx.moveTo(41, -10.5); ctx.lineTo(47.6, 32); ctx.moveTo(46.5, 24.2); ctx.lineTo(73.8, 23.4); ctx.stroke();
+  ctx.fillStyle = '#0c0f11'; ctx.fillRect(48, 37, 26, 2.5); ctx.fillRect(59, 34, 3, 4);
+}
+const ENGINE_GAUGES = [[-88, -26, 4], [-74, -24, 3.5], [-92, -14, 3]];
+// A dark wash over a piece of equipment that's broken (the cached layer always shows it intact)
+function brokenWash(pts) { poly(pts); ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fill(); }
 
+function drawSub() {
+  if (!subLayer || Math.abs(subLayer.sc - subLayerScale()) > 0.01) buildSubLayer();
+  const blink = sub.hullImm > 0.6 && Math.floor(time * 15) % 2 === 0;
+  ctx.save(); ctx.translate(sub.x, sub.y); ctx.rotate(visAng());
+  ctx.lineJoin = 'round';
+  // --- Propeller disc (spinning)
+  const pr = parts.propeller;
+  ctx.beginPath(); ctx.ellipse(PROP_POS[0], PROP_POS[1], 12, 15, 0, 0, Math.PI * 2);
+  ctx.fillStyle = pr.broken ? '#2a2224' : pr.bumps ? '#5a4650' : '#4a3d5c'; ctx.fill(); ctx.strokeStyle = '#07080a'; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.strokeStyle = 'rgba(160,140,190,0.35)'; ctx.lineWidth = 1.2;
+  if (!pr.broken) for (let i = 0; i < 3; i++) { const a = propAng + i * 2.09; ctx.beginPath(); ctx.ellipse(PROP_POS[0], PROP_POS[1], 10 * Math.abs(Math.cos(a)), 13, 0, 0, Math.PI * 2); ctx.stroke(); }
+  ctx.beginPath(); ctx.ellipse(PROP_POS[0], PROP_POS[1], 4.5, 6, 0, 0, Math.PI * 2); ctx.fillStyle = '#20182a'; ctx.fill();
+  // --- Everything static, in one blit
+  ctx.drawImage(subLayer.c, ...SUBL_BOX);
+  if (blink) { poly(HULL_OUTLINE); ctx.fillStyle = 'rgba(255,60,40,0.3)'; ctx.fill(); }
   // --- Water: murky teal with a moving surface line
   const wl = waterLineLocal();
   if (water > 0.001) {
@@ -1541,87 +1597,52 @@ function drawSub() {
     ctx.stroke(); ctx.restore();
   }
   ctx.font = '3.6px monospace'; ctx.textAlign = 'center'; ctx.lineWidth = 0.6;
-
-  // --- Engine: dark machine block with a purple housing, gauges, vibrating while it runs
-  const run = engine.state === 'running', jit = run ? (Math.random() - 0.5) * 0.35 : 0;
-  ctx.save(); ctx.translate(jit, jit * 0.5);
-  paintedBox(boxPts(ENGINE_BOX), run ? '#3e1f58' : '#241830', 0.5);
-  for (const [x, y, r] of [[-88, -26, 4], [-74, -24, 3.5], [-92, -14, 3]]) {
-    ctx.fillStyle = '#120c18'; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = '#5c4870'; ctx.lineWidth = 0.6; ctx.stroke();
-    ctx.strokeStyle = run ? '#d9c070' : '#4a4030'; ctx.beginPath(); ctx.moveTo(x, y);   // gauge needle
-    const a = run ? -2.2 + Math.sin(time * 3 + x) * 0.3 + 1.6 : 0.6; ctx.lineTo(x + Math.cos(a) * r * 0.8, y + Math.sin(a) * r * 0.8); ctx.stroke();
+  // --- Engine: needles twitch while it runs, report mark when it's off
+  const run = engine.state === 'running';
+  if (!run) { poly(boxPts(ENGINE_BOX)); ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fill(); }
+  ctx.lineWidth = 0.6;
+  for (const [x, y, r] of ENGINE_GAUGES) {
+    const a = run ? -0.6 + Math.sin(time * 3 + x) * 0.3 + (Math.random() - 0.5) * 0.1 : 0.6;
+    ctx.strokeStyle = run ? '#d9c070' : '#4a4030'; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(a) * r * 0.8, y + Math.sin(a) * r * 0.8); ctx.stroke();
   }
-  pipe(-64, -32, -54, -32, 1.2, 99);
-  label('ENGINE', -82, -36, '#9a8aa8');
   if (!run && engine.report) label(engine.report === 'malfunction' ? 'X' : engine.report === 'prevention' ? '!' : 'FUEL', -82, -9, engine.report === 'malfunction' ? '#f44' : '#fc3');
-  ctx.restore();
-  // Breaker
-  paintedBox(boxPts([BREAKER_POS[0] - 3, BREAKER_POS[1] - 4, 6, 8]), '#1d2226', 0.4);
+  // --- Breaker lever
   rect([BREAKER_POS[0] - 1, BREAKER_POS[1] + (gen.on ? -3 : 0), 2, 3], gen.on ? '#3a9a62' : '#a83232');
-  label('BRK', BREAKER_POS[0], BREAKER_POS[1] - 5, '#7d8a92');
-
-  // --- Bay door (dim yellow, hazard edge) + wheel; hazard frame around the doorway
-  hazardBand(DOOR_GAP[0] - 1, -27, DOOR_GAP[2] + 2, 2);
+  // --- Bay door slab (slides up as the wheel opens it) + wheel
   const dh = DOOR[3] * (1 - hatch.progress);
   if (dh > 0.5) { paintedBox(boxPts([DOOR[0], DOOR[1], DOOR[2], dh]), '#7a6a24', 0.45); hazardBand(DOOR[0], DOOR[1] + dh - 2, DOOR[2], 2); }
   drawWheel(false);
-
-  // --- Storage (dim orange locker), panel (dark console, green trim), pump (navy machine)
-  paintedBox(STORAGE_POLY, parts.storage.broken ? '#3a2410' : '#7a4a14', 0.5);
-  hazardBand(58, -26.6, 46, 1.6);
+  // --- Storage: spare part count, damage
   label(`STORAGE  ${spare}/${MAX_PARTS}`, 80, -29.5, '#c8a878');
-  if (parts.storage.broken) brokenX([58, -36, 44, 11]); else if (parts.storage.worn) wornMark(103, -28);
-  paintedBox(PANEL_POLY, parts.panel.broken ? '#18301c' : '#1f4426', 0.5);
-  ctx.strokeStyle = parts.panel.broken ? '#2c4a2e' : '#3fa060'; ctx.lineWidth = 0.4; poly(PANEL_POLY); ctx.stroke();
-  // Little screens + blinking buttons (the glow onto the room comes from the light map)
+  if (parts.storage.broken) { brokenWash(STORAGE_POLY); brokenX([58, -36, 44, 11]); } else if (parts.storage.worn) wornMark(103, -28);
+  // --- Panel: little screens + blinking buttons (their glow onto the room comes from the light map)
   const live = power() && panelOk();
   rect([97, -20, 6, 8], live ? '#0b3a22' : '#060808', '#000'); rect([98, -8, 7, 8], terminalAlive() ? '#0b3a22' : '#060808', '#000');
   if (live) { ctx.fillStyle = 'rgba(120,255,180,0.6)'; for (let i = 0; i < 3; i++) ctx.fillRect(98, -18.5 + i * 2.2, 2 + ((time * 3 + i) % 3), 0.6); }
   for (let i = 0; i < 4; i++) rect([86 + i * 4, 18, 2, 1.4], live && Math.sin(time * 4 + i * 1.7) > 0 ? ['#4f4', '#fc3', '#4cf', '#f55'][i] : '#1a2020');
-  label('PANEL', 95, 30, '#5a8a66'); if (parts.panel.broken) brokenX([83, 16, 24, 25]); else if (parts.panel.worn) wornMark(88, 22);
-  paintedBox(boxPts(PUMP_BOX), parts.pumpMech.dead ? '#0e0e10' : parts.pumpMech.broken ? '#141a30' : '#1d2850', 0.45);
-  ctx.drawImage(TEX.vent, PUMP_BOX[0] + 2, PUMP_BOX[1] + 1.5, 9, 5);
-  label('PUMP', 20.5, 47.5, '#7a8ab8');
-  if (parts.pumpMech.broken || parts.pumpMech.dead) brokenX(PUMP_BOX); else if (parts.pumpMech.worn) wornMark(3, 46);
+  if (parts.panel.broken) { brokenWash(PANEL_POLY); brokenX([83, 16, 24, 25]); } else if (parts.panel.worn) wornMark(88, 22);
+  // --- Pump damage + dry-run sparks
+  if (parts.pumpMech.broken || parts.pumpMech.dead) { brokenWash(boxPts(PUMP_BOX)); brokenX(PUMP_BOX); } else if (parts.pumpMech.worn) wornMark(3, 46);
   if (pumpSpark > 0) for (let i = 0; i < 6; i++) rect([6 + Math.random() * 20, 40 + Math.random() * 8, 1.5, 1.5], '#ffe680');
-
-  // --- Air crank on the back wall
+  // --- Air crank (turns)
   ctx.save(); ctx.translate(...CRANK_POS); ctx.rotate(crank.ang);
   ctx.strokeStyle = '#2e3a40'; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.arc(0, 0, CRANK_R, 0, Math.PI * 2); ctx.moveTo(0, 0); ctx.lineTo(CRANK_R, 0); ctx.stroke();
   ctx.strokeStyle = '#6a7a82'; ctx.lineWidth = 0.4; ctx.beginPath(); ctx.arc(0, 0, CRANK_R - 0.6, -2.5, -0.8); ctx.stroke();
   ctx.fillStyle = '#7a3a2a'; ctx.beginPath(); ctx.arc(CRANK_R, 0, 1.6, 0, Math.PI * 2); ctx.fill(); ctx.restore();
-  label('AIR CRANK', CRANK_POS[0], CRANK_POS[1] + 11, '#6a7a82');
-
-  // --- Module slots: dark red hatch frames with hazard trim and bolts, module boxes inside
+  // --- Modules sitting in the slots
   SLOTS.forEach((s, i) => {
-    ctx.save(); ctx.translate(...s.c); ctx.rotate(s.ang);
-    rect([-s.w / 2 - 0.8, -s.h / 2 - 0.8, s.w + 1.6, s.h + 1.6], '#0a0b0c');
-    paintedBox(boxPts([-s.w / 2, -s.h / 2, s.w, s.h]), '#5a1414', 0.35);
-    ctx.fillStyle = '#a8a39a';
-    for (const [x, y] of [[-s.w / 2 + 1.2, -s.h / 2 + 1.2], [s.w / 2 - 1.2, -s.h / 2 + 1.2], [-s.w / 2 + 1.2, s.h / 2 - 1.2], [s.w / 2 - 1.2, s.h / 2 - 1.2]]) { ctx.beginPath(); ctx.arc(x, y, 0.5, 0, Math.PI * 2); ctx.fill(); }
     const m = moduleIn(i);
-    if (m) {
-      const w = Math.min(s.w, s.h) > 12 ? s.w - 6 : s.w - 2, h = Math.min(s.h - 2, 9);
-      ctx.rotate(s.h > s.w ? -Math.PI / 2 : 0);
-      const ww = s.h > s.w ? s.h - 6 : w;
-      paintedBox(boxPts([-ww / 2, -h / 2, ww, h]), MODULE_COLORS[m.id], 0.25);
-      ctx.strokeStyle = m.broken ? '#f33' : m.worn ? '#fd3' : '#6a9a88'; ctx.lineWidth = 0.5; ctx.strokeRect(-ww / 2, -h / 2, ww, h);
-      label(m.id + (m.worn && !m.broken ? '!' : ''), 0, 1.3, m.broken ? '#f66' : m.worn ? '#fd3' : '#b8d8cc');
-    }
+    if (!m) return;
+    ctx.save(); ctx.translate(...s.c); ctx.rotate(s.ang);
+    const w = Math.min(s.w, s.h) > 12 ? s.w - 6 : s.w - 2, h = Math.min(s.h - 2, 9);
+    ctx.rotate(s.h > s.w ? -Math.PI / 2 : 0);
+    const ww = s.h > s.w ? s.h - 6 : w;
+    paintedBox(boxPts([-ww / 2, -h / 2, ww, h]), MODULE_COLORS[m.id], 0.25);
+    ctx.strokeStyle = m.broken ? '#f33' : m.worn ? '#fd3' : '#6a9a88'; ctx.lineWidth = 0.5; ctx.strokeRect(-ww / 2, -h / 2, ww, h);
+    label(m.id + (m.worn && !m.broken ? '!' : ''), 0, 1.3, m.broken ? '#f66' : m.worn ? '#fd3' : '#b8d8cc');
     ctx.restore();
   });
-
-  // --- Chair: dark padded seat facing the panel
-  ctx.fillStyle = '#15191c';
-  ctx.beginPath(); ctx.moveTo(37, -10); ctx.lineTo(41, -11); ctx.lineTo(48, 33); ctx.lineTo(44, 34); ctx.closePath(); ctx.fill();
-  ctx.beginPath(); ctx.moveTo(46, 24); ctx.lineTo(74, 23); ctx.lineTo(76, 31); ctx.lineTo(46, 35); ctx.closePath(); ctx.fill();
-  ctx.strokeStyle = 'rgba(150,175,185,0.25)'; ctx.lineWidth = 0.5;
-  ctx.beginPath(); ctx.moveTo(41, -10.5); ctx.lineTo(47.6, 32); ctx.moveTo(46.5, 24.2); ctx.lineTo(73.8, 23.4); ctx.stroke();
-  ctx.fillStyle = '#0c0f11'; ctx.fillRect(48, 37, 26, 2.5); ctx.fillRect(59, 34, 3, 4);
-
   drawFigure();
-  // Hold-E progress next to the hand
   if (hold.id) {
     const t = handTarget(), f = t && t.hold ? hold.t / t.hold : 0;
     rect([hand.x - 8, hand.y - 9, 16, 2.5], '#222'); rect([hand.x - 8, hand.y - 9, 16 * f, 2.5], '#fa3');
@@ -1722,11 +1743,11 @@ function drawBalloons(S, k) {
 }
 
 // ===================== LIGHTING =====================
-// A light map the size of the screen: white outside the sub (untouched), a dim ambient fill per room, then
-// lights added on top. It's multiplied over the scene, then the light sources get an additive bloom.
+// A small light map in the sub's own coordinates (it only covers the sub, not the screen): white where nothing
+// changes, a dim ambient fill per room, lights added on top. It's multiplied over the sub, then the light
+// sources get an additive bloom. Light is smooth, so a low resolution scaled up looks the same and costs little.
 let lightCv = null, lightG = null, frameLights = [];
-const LIGHT_RES = 1 / 3;   // the light map is smooth, so it's rendered small and scaled up (much cheaper)
-const GRADE_TINT = 'rgb(200,226,228)';   // blue-green colour grade, applied through the same multiply
+const LIGHT_RES = 1.2;   // light map px per sub-local unit
 const rgbS = c => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
 // Ambient fill per room for the current situation. The engine room is always darker and redder.
 function ambientLevels() {
@@ -1765,13 +1786,13 @@ function lightsList(dt) {
   return L;
 }
 function applyLighting(M, dt) {
-  const W = cv.width, H = cv.height, lw = Math.ceil(W * LIGHT_RES), lh = Math.ceil(H * LIGHT_RES);
-  if (!lightCv || lightCv.width !== lw || lightCv.height !== lh) { lightCv = makeCanvas(lw, lh); lightG = lightCv.getContext('2d'); }
+  const [bx, by, bw, bh] = SUBL_BOX, lw = Math.ceil(bw * LIGHT_RES), lh = Math.ceil(bh * LIGHT_RES);
+  if (!lightCv) { lightCv = makeCanvas(lw, lh); lightG = lightCv.getContext('2d'); }
   const g = lightG, A = ambientLevels();
   frameLights = lightsList(dt);
   g.setTransform(1, 0, 0, 1, 0, 0); g.globalCompositeOperation = 'source-over';
-  g.fillStyle = GRADE_TINT; g.fillRect(0, 0, lw, lh);   // outside the sub: just the blue-green grade
-  g.setTransform(new DOMMatrix([LIGHT_RES, 0, 0, LIGHT_RES, 0, 0]).multiply(M)); g.translate(sub.x, sub.y); g.rotate(visAng());
+  g.fillStyle = '#fff'; g.fillRect(0, 0, lw, lh);   // around the hull: unchanged
+  g.setTransform(LIGHT_RES, 0, 0, LIGHT_RES, -bx * LIGHT_RES, -by * LIGHT_RES);
   // Exterior: hull shell + propeller get the hull ambient
   g.fillStyle = rgbS(A.hull);
   g.beginPath(); HULL_OUTLINE.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath(); g.fill();
@@ -1788,10 +1809,16 @@ function applyLighting(M, dt) {
     g.fillStyle = gr; g.fillRect(-l.r, -l.r, 2 * l.r, 2 * l.r); g.restore();
   }
   g.restore();
-  // Multiply over the scene
-  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalCompositeOperation = 'multiply'; ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(lightCv, 0, 0, W, H); ctx.restore();
-  // Bloom: the sources themselves glow
+  // Multiply over the sub only
+  ctx.save(); ctx.setTransform(M); ctx.translate(sub.x, sub.y); ctx.rotate(visAng());
+  ctx.globalCompositeOperation = 'multiply'; ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(lightCv, bx, by, bw, bh); ctx.restore();
+  // Bloom: the sources themselves glow (high graphics only)
+  if (gfxHigh) bloom(M);
+  // In pitch dark the wheel handle glows on its own
+  if (!power() && darkT >= RED_LIGHT_TIME) { ctx.save(); ctx.setTransform(M); ctx.translate(sub.x, sub.y); ctx.rotate(visAng()); drawWheel(true); ctx.restore(); }
+}
+function bloom(M) {
   ctx.save(); ctx.setTransform(M); ctx.translate(sub.x, sub.y); ctx.rotate(visAng()); ctx.globalCompositeOperation = 'lighter';
   const glow = (x, y, r, c, i) => { const gr = ctx.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, `rgba(${c},${i})`); gr.addColorStop(1, `rgba(${c},0)`); ctx.fillStyle = gr; ctx.fillRect(x - r, y - r, 2 * r, 2 * r); };
   if (power() && sys.lights) for (const t of TUBES) {
@@ -1803,8 +1830,6 @@ function applyLighting(M, dt) {
   if (power() && panelOk()) { glow(100, -16, 7, '90,255,170', 0.35); glow(101.5, -4, 7, '90,255,170', 0.3); }
   if (!power() && darkT < RED_LIGHT_TIME) { glow(40, -35, 14, '255,50,40', 0.6 * strobe()); glow(-80, -44, 10, '255,50,40', 0.6 * strobe()); }
   ctx.restore();
-  // In pitch dark the wheel handle glows on its own
-  if (!power() && darkT >= RED_LIGHT_TIME) { ctx.save(); ctx.setTransform(M); ctx.translate(sub.x, sub.y); ctx.rotate(visAng()); drawWheel(true); ctx.restore(); }
 }
 // Post: thick vignette + film grain, pre-rendered together as a few full-screen frames (rebuilt on resize)
 // and cycled at random: one plain blit per frame. (The blue-green grade rides along in the light map's multiply.)
@@ -1826,6 +1851,35 @@ function postFX() {
   ctx.drawImage(postFrames[Math.floor(Math.random() * postFrames.length)], 0, 0);
   ctx.restore();
 }
+// Graphics quality. HIGH = grain, bloom, marine snow, screen static. If frames are slow it drops to LOW on its own
+// (G switches manually, and turns the automatic switch off).
+let gfxHigh = true, gfxAuto = true, frameAvg = 16.7;
+function trackFrameTime(ms) {
+  if (ms > 250) return;                       // tab switch etc.
+  frameAvg += (ms - frameAvg) * 0.03;
+  if (gfxAuto && gfxHigh && runTime > 3 && frameAvg > 22) { gfxHigh = false; log('GRAPHICS: LOW (G TO SWITCH)', 'warn'); }
+}
+function toggleGfx() { gfxHigh = !gfxHigh; gfxAuto = false; log(`GRAPHICS: ${gfxHigh ? 'HIGH' : 'LOW'}`, 'good'); }
+// Red emergency glow around the screen edges, pre-rendered per screen size
+let alarmCv = null;
+function alarmEdge(W, H) {
+  if (!alarmCv || alarmCv.width !== W || alarmCv.height !== H) {
+    alarmCv = makeCanvas(W, H); const g = alarmCv.getContext('2d');
+    const gr = g.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.7);
+    gr.addColorStop(0, 'rgba(255,0,0,0)'); gr.addColorStop(1, 'rgba(255,0,0,0.4)'); g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  }
+  return alarmCv;
+}
+// Low graphics: the vignette without grain, and only the four edge bands (the middle is skipped entirely)
+function postFXLow() {
+  const W = cv.width, H = cv.height;
+  if (!postFrames.length || postFrames[0].width !== W || postFrames[0].height !== H) postFX();   // builds the frames
+  const v = postFrames[0], bw = Math.round(W * 0.22), bh = Math.round(H * 0.22);
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(v, 0, 0, W, bh, 0, 0, W, bh); ctx.drawImage(v, 0, H - bh, W, bh, 0, H - bh, W, bh);
+  ctx.drawImage(v, 0, bh, bw, H - 2 * bh, 0, bh, bw, H - 2 * bh); ctx.drawImage(v, W - bw, bh, bw, H - 2 * bh, W - bw, bh, bw, H - 2 * bh);
+  ctx.restore();
+}
 // Marine snow: specks drifting in the water around the sub (pure atmosphere, no information)
 let snow = [];
 const SNOW_BOX = [1600, 1100];
@@ -1838,6 +1892,7 @@ function updateSnow(dt) {
   }
 }
 function drawSnow() {
+  if (!gfxHigh) return;
   ctx.fillStyle = 'rgba(150,185,195,0.22)';
   for (const f of snow) ctx.fillRect(f.x, f.y, f.s, f.s);
 }
@@ -1884,34 +1939,63 @@ function screenTexture(R) {
   screenTex = { R, c };
   return c;
 }
-// Offscreen buffer the sonar returns are drawn into (recreated when the screen size changes)
-let glowBuf = null;
-const GLOW_RES = 0.5;
-function glowBuffer(R) {
-  const n = Math.ceil(2 * R * GLOW_RES);
-  if (!glowBuf || glowBuf.width !== n) { glowBuf = document.createElement('canvas'); glowBuf.width = glowBuf.height = n; }
-  return glowBuf;
+// The sonar screen's static parts, pre-rendered per size: the glass underneath (bezel, gradient, grain texture,
+// range rings) and the layer on top (edge vignette, beige rim, ticks). Two blits per frame instead of re-drawing.
+let sonarCache = null;
+function sonarLayers(R) {
+  if (sonarCache && sonarCache.R === R) return sonarCache;
+  const n = Math.ceil(2 * R + 40), c0 = n / 2;
+  const under = makeCanvas(n, n), g = under.getContext('2d');
+  g.fillStyle = '#121615'; g.beginPath(); g.arc(c0, c0, R + 18, 0, Math.PI * 2); g.fill();
+  g.strokeStyle = '#2c3330'; g.lineWidth = 3; g.stroke();
+  g.save(); g.beginPath(); g.arc(c0, c0, R, 0, Math.PI * 2); g.clip();
+  const bg = g.createRadialGradient(c0, c0, 0, c0, c0, R);
+  bg.addColorStop(0, '#16221d'); bg.addColorStop(0.7, '#0c1512'); bg.addColorStop(1, '#060a09');
+  g.fillStyle = bg; g.fillRect(c0 - R, c0 - R, 2 * R, 2 * R);
+  g.drawImage(screenTexture(R), c0 - R, c0 - R);
+  g.strokeStyle = 'rgba(150,200,180,0.07)'; g.lineWidth = 1; g.beginPath();
+  for (const f of [1 / 3, 2 / 3]) { g.moveTo(c0 + R * f, c0); g.arc(c0, c0, R * f, 0, Math.PI * 2); }
+  g.stroke(); g.restore();
+  const over = makeCanvas(n, n), h = over.getContext('2d');
+  h.save(); h.beginPath(); h.arc(c0, c0, R, 0, Math.PI * 2); h.clip();
+  const vg = h.createRadialGradient(c0, c0, R * 0.75, c0, c0, R);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.55)'); h.fillStyle = vg; h.fillRect(0, 0, n, n); h.restore();
+  h.strokeStyle = 'rgba(215,200,165,0.8)'; h.lineWidth = 2; h.beginPath(); h.arc(c0, c0, R, 0, Math.PI * 2); h.stroke();
+  h.strokeStyle = 'rgba(215,200,165,0.45)'; h.lineWidth = 1; h.beginPath();
+  for (let i = 0; i < 72; i++) {
+    const a = i * Math.PI / 36, l = i % 6 ? 6 : 12;
+    h.moveTo(c0 + Math.cos(a) * (R - 2), c0 + Math.sin(a) * (R - 2)); h.lineTo(c0 + Math.cos(a) * (R - 2 - l), c0 + Math.sin(a) * (R - 2 - l));
+  }
+  h.stroke();
+  return sonarCache = { R, n, under, over };
+}
+// Sonar returns: additive glow blobs drawn straight onto the screen. No buffer and no clip mask (both are
+// expensive full-screen-sized operations on machines that render the canvas on the CPU): dots too close
+// to the rim are simply skipped so nothing spills over it.
+function drawSonarGlow(S, cx, cy, R, k) {
+  const base = SONAR_BLOB * k * 2;
+  ctx.globalCompositeOperation = 'lighter';
+  for (const p of dots) {
+    const age = time - p.t, f = age / p.fade, [x, y] = S(p.x, p.y);
+    const sz = Math.max(4, Math.round(base * p.size * (age < 0.25 ? 1.5 - age * 2 : 1) / 2) * 2);   // fresh returns bloom
+    if (Math.hypot(x - cx, y - cy) > R - sz / 2) continue;
+    const step = Math.min(RAMP_STEPS - 1, Math.floor(f * RAMP_STEPS));
+    ctx.globalAlpha = p.bright * Math.pow(1 - f, 0.8) * SONAR_BLOB_ALPHA;
+    ctx.drawImage(blobSprite(p.kind, step, sz), Math.round(x - sz / 2), Math.round(y - sz / 2));
+  }
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
 }
 function drawSonarScreen(L) {
   const { cx, cy, R } = L, k = R / MURK_RADIUS;
   const S = (x, y) => [cx + (x - sub.x) * k, cy + (y - sub.y) * k];
-  // Bezel
-  ctx.fillStyle = '#121615'; ctx.beginPath(); ctx.arc(cx, cy, R + 18, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = '#2c3330'; ctx.lineWidth = 3; ctx.stroke();
+  const SL = sonarLayers(R);
+  ctx.drawImage(SL.under, cx - SL.n / 2, cy - SL.n / 2);
+  if (power() && dots.length) drawSonarGlow(S, cx, cy, R, k);   // before the clip: it's pre-masked
   ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
-  // Glass: dark teal-brown, a bit lighter in the middle
-  const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
-  bg.addColorStop(0, '#16221d'); bg.addColorStop(0.7, '#0c1512'); bg.addColorStop(1, '#060a09');
-  ctx.fillStyle = bg; ctx.fillRect(cx - R, cy - R, 2 * R, 2 * R);
   ctx.textAlign = 'center'; ctx.font = 'bold 16px monospace';
   const s = mod('SONAR');
-  if (!power()) { ctx.fillStyle = gen.boot > 0 ? '#5a5' : '#411'; ctx.fillText(gen.boot > 0 ? 'BOOTING...' : 'NO POWER', cx, cy); }
+  if (!power()) { ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(cx - R, cy - R, 2 * R, 2 * R); ctx.fillStyle = gen.boot > 0 ? '#5a5' : '#411'; ctx.fillText(gen.boot > 0 ? 'BOOTING...' : 'NO POWER', cx, cy); }
   else {
-    ctx.drawImage(screenTexture(R), cx - R, cy - R);
-    // Faint range rings
-    ctx.strokeStyle = 'rgba(150,200,180,0.07)'; ctx.lineWidth = 1; ctx.beginPath();
-    for (const f of [1 / 3, 2 / 3]) { ctx.moveTo(cx + R * f, cy); ctx.arc(cx, cy, R * f, 0, Math.PI * 2); }
-    ctx.stroke();
     // Where the sonar can aim from its slot, and where it's aimed
     if (installed('SONAR')) {
       const { o, faceA, aim } = sonarAim(), [ox, oy] = S(o.x, o.y);
@@ -1921,22 +2005,9 @@ function drawSonarScreen(L) {
     }
     // Returns: additive glow blobs. Overlaps get brighter, so repeatedly pinged walls burn in.
     // Drawn into an unclipped buffer first (per-draw clipping is slow), then copied onto the round screen once.
-    const buf = glowBuffer(R), g = buf.getContext('2d');
-    g.globalCompositeOperation = 'source-over'; g.clearRect(0, 0, buf.width, buf.height);
-    g.globalCompositeOperation = 'lighter';
-    // (half resolution: the glow is soft anyway, and it's 4x fewer pixels to clear and copy)
-    const hs = GLOW_RES, base = SONAR_BLOB * k * 2 * hs, ox0 = cx - R, oy0 = cy - R;
-    for (const p of dots) {
-      const age = time - p.t, f = age / p.fade, [x, y] = S(p.x, p.y);
-      if (x < ox0 - 20 || y < oy0 - 20 || x > ox0 + 2 * R + 20 || y > oy0 + 2 * R + 20) continue;
-      const step = Math.min(RAMP_STEPS - 1, Math.floor(f * RAMP_STEPS));
-      const sz = Math.max(2, Math.round(base * p.size * (age < 0.25 ? 1.5 - age * 2 : 1) / 2) * 2);   // fresh returns bloom
-      g.globalAlpha = p.bright * Math.pow(1 - f, 0.8) * SONAR_BLOB_ALPHA;
-      g.drawImage(blobSprite(p.kind, step, sz), Math.round((x - ox0) * hs - sz / 2), Math.round((y - oy0) * hs - sz / 2));
-    }
-    g.globalAlpha = 1;
     ctx.globalCompositeOperation = 'lighter';
-    ctx.drawImage(buf, ox0, oy0, 2 * R, 2 * R);
+
+
     // Outgoing wavefront (flickery) and returning echo specks
     ctx.strokeStyle = SONAR_COLOR; ctx.lineWidth = 1;
     for (const p of pings) {
@@ -1953,7 +2024,7 @@ function drawSonarScreen(L) {
     ctx.globalAlpha = 0.35; ctx.fillStyle = SONAR_COLOR;
     for (const ec of echoes) { const [x, y] = S(ec.x, ec.y); ctx.fillRect(x - 1, y - 1, 2, 2); }
     // Faint static
-    for (let i = 0; i < 18; i++) { ctx.globalAlpha = Math.random() * 0.25; ctx.fillStyle = '#4af'; ctx.fillRect(cx - R + Math.random() * 2 * R, cy - R + Math.random() * 2 * R, 2, 2); }
+    if (gfxHigh) for (let i = 0; i < 18; i++) { ctx.globalAlpha = Math.random() * 0.25; ctx.fillStyle = '#4af'; ctx.fillRect(cx - R + Math.random() * 2 * R, cy - R + Math.random() * 2 * R, 2, 2); }
     ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
     // Own sub: thin pale outline, like the reference
     ctx.strokeStyle = 'rgba(225,230,220,0.75)'; ctx.lineWidth = 1.2;
@@ -1964,25 +2035,28 @@ function drawSonarScreen(L) {
     else if (s.slot < 0 || s.carried) { ctx.font = '12px monospace'; ctx.fillText('NO DIRECTIONAL MODULE - RMB STILL PINGS ALL AROUND', cx, cy - R * 0.55); ctx.font = 'bold 16px monospace'; }
     else if (s.broken) ctx.fillText('SONAR MODULE BROKEN', cx, cy - R * 0.55);
     if (phase === 'dock') { ctx.fillStyle = '#9cf'; ctx.fillText('DOCKED', cx, cy + R * 0.6); }
-    // Glass vignette
-    const vg = ctx.createRadialGradient(cx, cy, R * 0.75, cx, cy, R);
-    vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.55)');
-    ctx.fillStyle = vg; ctx.fillRect(cx - R, cy - R, 2 * R, 2 * R);
   }
   ctx.restore();
-  // Beige rim with tick marks
-  ctx.strokeStyle = 'rgba(215,200,165,0.8)'; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
-  ctx.strokeStyle = 'rgba(215,200,165,0.45)'; ctx.lineWidth = 1; ctx.beginPath();
-  for (let i = 0; i < 72; i++) {
-    const a = i * Math.PI / 36, l = i % 6 ? 6 : 12;
-    ctx.moveTo(cx + Math.cos(a) * (R - 2), cy + Math.sin(a) * (R - 2)); ctx.lineTo(cx + Math.cos(a) * (R - 2 - l), cy + Math.sin(a) * (R - 2 - l));
-  }
-  ctx.stroke();
+  // Edge vignette, beige rim, ticks (cached)
+  ctx.drawImage(SL.over, cx - SL.n / 2, cy - SL.n / 2);
   ctx.fillStyle = '#9ab'; ctx.font = '12px monospace'; ctx.textAlign = 'center';
   ctx.fillText('WASD steer · LMB directional ping · RMB all-around ping · hold E arm · Q horn · F stand', cv.width / 2, cv.height - 12);
 }
+// The terminal is text that changes slowly, so it's rendered into an image ~10 times a second, not every frame
+let termCache = null;
 function drawTerminal(L) {
+  const key = `${L.tx}|${L.ty}|${L.tw}|${L.th}|${cv.width}|${cv.height}`;
+  if (!termCache || termCache.key !== key || time - termCache.t > 0.1 || time < termCache.t) {
+    const pad = 14, c = termCache && termCache.key === key ? termCache.c : makeCanvas(L.tw + 2 * pad, L.th + 2 * pad);
+    const keep = ctx; ctx = c.getContext('2d'); ctx.setTransform(1, 0, 0, 1, pad - L.tx, pad - L.ty); ctx.clearRect(L.tx - pad, L.ty - pad, c.width, c.height);
+    renderTerminal(L);
+    ctx = keep;
+    termCache = { key, c, t: time, pad, buttons: termButtons };
+  }
+  termButtons = termCache.buttons;
+  ctx.drawImage(termCache.c, L.tx - termCache.pad, L.ty - termCache.pad);
+}
+function renderTerminal(L) {
   const { tx: x, ty: y, tw: w, th: h } = L;
   ctx.fillStyle = '#26292e'; ctx.fillRect(x - 12, y - 12, w + 24, h + 24);
   ctx.strokeStyle = '#4a4f57'; ctx.lineWidth = 2; ctx.strokeRect(x - 12, y - 12, w + 24, h + 24);
@@ -2086,7 +2160,12 @@ function bar(x, y, w, f, c, t) {
 }
 function draw() {
   const W = cv.width, H = cv.height, e = zoomEase();
-  ctx.fillStyle = '#04101f'; ctx.fillRect(0, 0, W, H);
+  const monitorsOnly = mode === 'seated' && zoomT === 0 && !sub.dead;   // monitors cover the view: skip the scene
+  ctx.fillStyle = monitorsOnly ? '#020509' : '#04101f'; ctx.fillRect(0, 0, W, H);
+  if (!monitorsOnly) drawScene(W, H, e);
+  drawOverlays(W, H);
+}
+function drawScene(W, H, e) {
   const sk = shakeAmp * (shake / SHAKE_TIME) * (1 + 1.5 * e);
   ctx.save();
   ctx.translate(W / 2 + (Math.random() - 0.5 + shakeBias * 0.4) * 2 * sk, H / 2 + (Math.random() - 0.5) * 2 * sk);
@@ -2101,16 +2180,14 @@ function draw() {
   ctx.globalAlpha = 1;
   drawSub();
   ctx.restore();
-  if (mode !== 'seated' || zoomT > 0 || sub.dead) applyLighting(M, frameDt);   // seated: the monitors cover it anyway
-  postFX();
-
-  if (redLight()) {
-    const gr = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.7);
-    gr.addColorStop(0, 'rgba(255,0,0,0)'); gr.addColorStop(1, 'rgba(255,0,0,0.4)');
-    ctx.fillStyle = gr; ctx.fillRect(0, 0, W, H);
-  }
+  applyLighting(M, frameDt);
+  if (gfxHigh) postFX(); else postFXLow();
+}
+// Everything drawn over the scene: red alarm edges, monitors, storage window, HUD
+function drawOverlays(W, H) {
+  if (redLight()) ctx.drawImage(alarmEdge(W, H), 0, 0);
   if (mode === 'seated' && !sub.dead) {
-    ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(0, 0, W, H);
+    if (zoomT > 0) { ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(0, 0, W, H); }
     const L = monitorLayout();
     if (parts.panel.broken && snapshot && terminalAlive()) {
       ctx.drawImage(snapshot, 0, 0); termButtons = [];
@@ -2150,7 +2227,7 @@ function draw() {
   }
   ctx.font = '12px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = '#7ab';
   const dbg = [`SPD ${Math.hypot(sub.vx, sub.vy).toFixed(0)}`, `CREATURE ${(Math.hypot(sub.x - creature.x, sub.y - creature.y) / 10).toFixed(0)} m`,
-    `MODE ${mode}  FIG ${fig.x.toFixed(0)} face ${fig.face}`, `ENGINE ${engine.state}${engine.report ? ' ' + engine.report : ''}`, `RUN ${runTime.toFixed(0)}s  QUOTAS ${quotasMet}`];
+    `MODE ${mode}  FIG ${fig.x.toFixed(0)} face ${fig.face}`, `ENGINE ${engine.state}${engine.report ? ' ' + engine.report : ''}`, `RUN ${runTime.toFixed(0)}s  QUOTAS ${quotasMet}`, `GFX ${gfxHigh ? 'HIGH' : 'LOW'} (G)  ${(1000 / frameAvg).toFixed(0)} fps`];
   dbg.forEach((t, i) => ctx.fillText(t, W - 12, 18 + i * 16));
 
   if (sub.dead) {
@@ -2165,6 +2242,7 @@ function draw() {
 // ===================== LOOP =====================
 let last = performance.now(), frameDt = 1 / 60;
 function frame(now) {
+  trackFrameTime(now - last);
   const dt = Math.min((now - last) / 1000, 1 / 30);
   last = now;
   frameDt = dt;

@@ -22,6 +22,7 @@ Grim submarine, not a cartoon. All textures are currently procedural (see CREDIT
 - Lighting: a light map multiplied over the sub. Dim ambient fill per room, flickering fluorescent tubes with soft cones (the engine room one flickers worse), green/cyan screen light from the panel, violet/warm engine glow while running, red strobe in damaged rooms. Power out: red emergency strobe for 30 s, then pitch dark with only the bay wheel glowing. The engine room is always darker and redder.
 - Post: bloom on light sources, blue-green grade (folded into the light map), thick vignette, film grain. Marine snow drifts outside the hull.
 - Screens, labels, gauges, the sonar and the terminal are drawn in code.
+- Performance (target: 60 fps at 1080p even when the browser renders the canvas on the CPU, as on older laptops): the static sub is rendered once into a cached image; the light map lives in the sub's own small coordinate space; vignette, grain and the red alarm glow are pre-rendered; the sonar glass and the terminal are cached; sonar blobs are drawn straight to the screen (no buffers or clip masks). Graphics quality drops to LOW by itself if frames get slow (no grain, bloom, marine snow, screen static); G toggles it.
 
 ## The level: the trench
 One fixed level, generated from a fixed seed (identical every run). About 550 m deep.
