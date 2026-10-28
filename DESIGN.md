@@ -52,7 +52,7 @@ Parts:
 - Propeller: outside, back. Thrust. Breaks, cannot be repaired. Only creatures break it, 3 bumps (warning stage).
 - Engine: inside, back, own hatch (wheel lock). Power for everything. Internals repairable from inside.
 - Control panel (green): front wall, facing the chair. On/off for every system, power readout, damage reports, runs the arm. Second most important after the engine.
-- Storage (orange): top. Holds the 3 gas canisters, spare parts (max 6) and spare modules. Most fragile, 1 in 2 break roll; a break destroys one stored part. While it's broken it won't open and the stored canisters bleed out one at a time (25 s each, the gas goes into the cabin air). Patch it with a METAL part to stop it.
+- Storage (orange): top. Holds spare parts and gas canisters (6 in all), the spare shockwave charges (own rack) and spare modules. Most fragile, 1 in 2 break roll; a break destroys one stored part. While it's broken every charge still inside leaks empty in 5 to 8 s (into the cabin air): open it and carry them out, one at a time. Patch it with a METAL part.
 - Water pump mechanism (blue): floor, front corner. Only works with the pump module installed in the floor (bottom) slot.
 - Hull: 200 HP, 20 per hit. Most durable.
 - Arm: slides on a rail along the bottom middle.
@@ -103,7 +103,7 @@ Control panel failure: everything freezes in its current state (systems, screens
 - Demo creature: one, stationary, about 70x70, invisible until pinged. Contact: 30 damage, hard knockback, always an engine malfunction, bumps the propeller.
 
 ## Hatches, water, pump, modules
-- Horn: Q (or the terminal button) from the chair. Each blast uses one gas canister from storage (3, refilled at the dock), no power needed, but a frozen panel can't fire it. The blast goes out of whatever side the horn is mounted on, shoves a creature it catches away (it drifts back), and kicks the sub the other way. A canister can instead be taken in hand and its valve opened (hold E, 1 s) for +30% air.
+- Horn: Q (or the terminal button) from the chair. Runs on shockwave charges (compressed air): it holds ONE loaded charge, fires it, and then someone has to reload it by hand (take a charge from storage, touch the horn module, hold E 1.5 s). 3 charges per dive: one loaded + two in storage, refilled at the dock. No power needed, but a frozen panel can't fire it. The blast goes out of whatever side the horn is mounted on, shoves a creature it catches away (it drifts back), and kicks the sub the other way. A charge is compressed air, so it can be vented instead (hold E, 1 s) for +15% air.
 - Modules: sonar, pump, air generator, horn. Any module fits any slot; taking one out or putting one in cycles the hatch and traps one bucket of water (5%). Free while docked.
 - Spare modules live in the orange storage: touch it and press E to open the inventory, click a module to take it in your hand, click a slot to install it (whatever was there swaps into your hand).
 - Air generator: works in any slot, needs power. Not installed or no power = air falls (60 s), the hand crank slows that.
@@ -128,8 +128,9 @@ Control panel failure: everything freezes in its current state (systems, screens
 - Spare parts: burned by mid-dive repairs (docked repairs are free).
 
 ## Items and hands-on repairs
-- Three spare part types, each its own item: COMPRESSION PIPE (fixes the pump), AIR FILTER (fixes the air generator), METAL PART (fixes everything else: engine, panel, storage, sonar, horn). Plus GAS CANISTERS for the horn.
-- Start of every dive: 1 of each part + 3 canisters in storage. Scrap rolls a type (metal is twice as common).
+- Three spare part types, each its own item: COMPRESSION PIPE (fixes the pump), AIR FILTER (fixes the air generator), METAL PART (fixes everything else: engine, panel, storage, sonar, horn). Plus SHOCKWAVE CHARGES (horn ammo / emergency air) and GAS CANISTERS (gasoline).
+- Gas canister: hold it, touch the engine (bay open), hold E 2 s: +33% fuel. Fuel doesn't refill between dives, so these are how a run goes longer. Start a run with 1; buy more at the dock (B, 60 coins). Refueling a dry engine lets you restart it.
+- Start of a run: 1 of each part + 1 gas canister in storage. Scrap rolls a part type (metal is twice as common).
 - Mid-dive repair: open the storage (touch + click), click the part to take it in your hand, walk to the broken thing, touch it and press E. That starts the part's minigame; finishing it uses the part up. Wrong part = refused with a hint.
 - Minigames (docked repairs skip them, just a quick hold):
   - METAL: hammer rivets. A marker sweeps a bar; E or click when it's in the green. 3 rivets (4 for the engine), each a bit faster. A miss just costs time.
@@ -137,7 +138,7 @@ Control panel failure: everything freezes in its current state (systems, screens
   - FILTER: slide the cartridge in. The gap in the housing drifts; keep the cartridge under it with the mouse and hold E to push. Off the gap it jams and slips back.
   - A/D, ESC or getting knocked down by a hit stops it. Progress is kept for that repair until you finish it or dock.
 - Click with an item in hand to drop it; touch a floor item and click to pick it up; touch the storage with it to stow it.
-- Parts are weight (slow sink, inertia); canisters aren't counted.
+- Parts and gas canisters are weight (slow sink, inertia); charges aren't counted.
 
 ## Vision
 - The engine room is pitch black while its door is sealed; it fades in as the door opens.

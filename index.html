@@ -86,7 +86,7 @@ const SCREW_TURNS      = 2.5;  // PIPE: circle the mouse clockwise this many tur
 const FILTER_TIME      = 3.0;  // FILTER: seconds of pushing (hold E) with the cartridge lined up under the guide
 const FILTER_SLACK     = 0.12; // how far off the guide (fraction of the track) still slides in
 const DOCK_REPAIR_TIME = 1.5;  // free while docked
-const MAX_PARTS        = 6;    // spare parts the storage holds (gas canisters have their own rack)
+const MAX_PARTS        = 6;    // spare parts + gas canisters the storage holds (horn charges have their own rack)
 const START_PARTS      = ['METAL', 'PIPE', 'FILTER'];   // in storage at the start of a run
 const SCRAP_MIX        = ['METAL', 'METAL', 'PIPE', 'FILTER'];   // what a piece of scrap turns out to be (random pick)
 const ITEM_SLIDE       = 140;  // px/s^2 loose items slide per radian of tilt
@@ -140,15 +140,21 @@ const CREATURE_DAMAGE   = 30;
 const CREATURE_KNOCKBACK= 500;
 const CREATURE_DOT_FADE = 9.0;
 // Shockwave horn (module): compressed air charges, no power cost. Fire with Q (or the button) from the chair.
-const HORN_CHARGES    = 3;     // gas canisters, kept in storage; the horn uses one per blast. Refilled at the dock
+const HORN_CHARGES    = 3;     // compressed-air charges per dive: one loaded in the horn, the rest in storage. Refilled at the dock
+const RELOAD_TIME     = 1.5;   // carry a charge to the horn module, hold E: loaded (the horn holds one)
 const HORN_RANGE      = 260;   // px the shockwave travels
 const HORN_SPEED      = 700;   // px/s
 const HORN_ARC        = 1.0;   // radians each side of the slot's facing
 const HORN_PUSH       = 320;   // px/s the shockwave shoves a creature away
 const HORN_RECOIL     = 60;    // px/s kick on the sub, opposite the blast
 const CREATURE_RETURN = 20;    // px/s a shoved creature drifts back home
-const CHARGE_AIR      = 0.3;   // carry a canister, hold E to open its valve: this much air (a full one)
-const CANISTER_LEAK_TIME = 25; // broken storage: a stored canister bleeds empty in this many seconds, one at a time (the gas ends up in the cabin air)
+const CHARGE_AIR      = 0.15;  // carry a charge, hold E to open its valve: this much air (a full one). It's compressed air, so it's breathable
+const CHARGE_LEAK     = [5, 8];// broken storage: every stored charge bleeds empty in 5 to 8 s (into the cabin air) - carry them out fast
+// Gas canisters (gasoline): pour one into the engine for fuel
+const GAS_FUEL        = 0.33;  // fuel per canister
+const POUR_TIME       = 2.0;   // hold E on the engine with a canister in your hand
+const START_GAS       = 1;     // in storage at the start of a run
+const GAS_COST        = 60;    // coins for another one at the dock (B)
 // Loot + robot arm
 const RELIC_SIZE     = 16;
 const RELIC_VALUE    = 125;    // the two bait relics by the creature
@@ -371,8 +377,9 @@ function reset() {
   // Water: cabin level (water, 0..1 of the cabin height) and engine room level (engWater, 0..1 of its height).
   // slosh = the surface's extra tilt from the sub's acceleration (a damped spring)
   engWater = 0; slosh = { a: 0, v: 0, lastVx: 0 }; termShorted = false;
-  // Loose items: spare parts (PIPE, FILTER, METAL) and gas canisters. where: 'storage' | 'hand' | 'floor'
-  items = [...START_PARTS.map(type => ({ type, where: 'storage' })), ...Array.from({ length: HORN_CHARGES }, () => ({ type: 'CANISTER', where: 'storage', gas: 1 }))];
+  // Loose items: spare parts (PIPE, FILTER, METAL), gas canisters (GAS) and horn charges (CHARGE). where: 'storage' | 'hand' | 'floor'
+  // (the dock tops the charges up)
+  items = [...START_PARTS.map(type => ({ type, where: 'storage' })), ...Array.from({ length: START_GAS }, () => ({ type: 'GAS', where: 'storage' }))];
   // Engine: 'running' | 'off'. report = why it's off. stopIn > 0 = report shown, engine still turning.
   engine = { state: 'running', report: null, stopIn: 0, flooded: false };
   gen = { on: true, boot: 0 };
@@ -388,7 +395,7 @@ function reset() {
     { id: 'AIR',   slot: 0, broken: false, imm: 0, carried: false },
     { id: 'SONAR', slot: 1, broken: false, imm: 0, carried: false },
     { id: 'PUMP',  slot: FLOOR_SLOT, broken: false, imm: 0, carried: false },
-    { id: 'HORN',  slot: -1, broken: false, imm: 0, carried: false },
+    { id: 'HORN',  slot: -1, broken: false, imm: 0, carried: false, loaded: 0 },   // loaded = air in its charge (0 = empty)
   ];
   creature = { x: CREATURE_HOME[0], y: CREATURE_HOME[1], vx: 0, vy: 0 };
   hornWaves = [];
@@ -431,16 +438,17 @@ const ITEM_TYPES = {
   PIPE:     { name: 'COMPRESSION PIPE', short: 'PIPE' },     // fixes the pump (mechanism and module)
   FILTER:   { name: 'AIR FILTER',       short: 'FILTER' },   // fixes the air generator
   METAL:    { name: 'METAL PART',       short: 'METAL' },    // fixes everything else, including a malfunctioned engine
-  CANISTER: { name: 'GAS CANISTER',     short: 'GAS' },      // horn ammo, or emergency air
+  GAS:      { name: 'GAS CANISTER',     short: 'GAS' },      // gasoline: +33% fuel poured into the engine
+  CHARGE:   { name: 'SHOCKWAVE CHARGE', short: 'CHARGE' },   // compressed air: horn ammo, or emergency air
 };
 const isItem = c => c && !!c.type;
 const carriedName = c => isItem(c) ? ITEM_TYPES[c.type].short : c.id;
-const sparesAboard = () => items.filter(i => i.type !== 'CANISTER').length;            // weight
-const storedParts = () => items.filter(i => i.where === 'storage' && i.type !== 'CANISTER').length;
+const sparesAboard = () => items.filter(i => i.type !== 'CHARGE').length;            // weight (parts and gasoline)
+const storedParts = () => items.filter(i => i.where === 'storage' && i.type !== 'CHARGE').length;
 const storedOf = type => items.filter(i => i.where === 'storage' && i.type === type).length;
-const canisters = () => storedOf('CANISTER');
-const storedCanisters = () => items.filter(i => i.where === 'storage' && i.type === 'CANISTER');
-const storageLeaking = () => parts.storage.broken && phase === 'dive' && storedCanisters().length > 0;                                          // horn charges
+const charges = () => storedOf('CHARGE');                                              // spare horn charges
+const storedCharges = () => items.filter(i => i.where === 'storage' && i.type === 'CHARGE');
+const storageLeaking = () => parts.storage.broken && phase === 'dive' && storedCharges().length > 0;
 const mass = () => 1 + sparesAboard() * PART_MASS;
 const moduleIn = slot => modules.find(m => m.slot === slot && !m.carried);
 const mod = id => modules.find(m => m.id === id);
@@ -601,6 +609,8 @@ const SFX = {
   clink:   () => { tone(1900 + Math.random() * 300, 0.08, 0, 'triangle', 0.04); tone(2900, 0.05, 0.01, 'triangle', 0.02); },
   drop:    () => { tone(160, 0.12, 0, 'sine', 0.15, { glide: 90 }); tone(1400, 0.06, 0, 'triangle', 0.02); },
   vent:    () => noise(1.2, 0.18, { type: 'highpass', freq: 2500, glide: 4000, attack: 0.02 }),
+  pour:    () => { noise(1.8, 0.12, { type: 'bandpass', freq: 500, glide: 900, q: 1.5, attack: 0.15 }); for (let i = 0; i < 6; i++) tone(300 + i * 40, 0.08, 0.2 + i * 0.25, 'sine', 0.02); },
+  dry:     () => { tone(90, 0.15, 0, 'square', 0.05, { cut: 600 }); noise(0.1, 0.1, { type: 'highpass', freq: 3000, delay: 0.05 }); },
   starter: () => { tone(30, 1.1, 0, 'sawtooth', 0.12, { glide: 90, cut: 600, attack: 0.1 }); noise(0.08, 0.2, { type: 'highpass', freq: 2000 }); tone(42, 0.6, 1.0, 'sawtooth', 0.12, { cut: 300 }); },
   breaker: () => { noise(0.06, 0.4, { type: 'highpass', freq: 1500 }); tone(120, 0.25, 0, 'square', 0.08, { cut: 900 }); },
   zap:     () => { for (let i = 0; i < 5; i++) noise(0.05, 0.2, { type: 'highpass', freq: 3000, delay: i * 0.06 * Math.random() * 2 }); tone(60, 0.5, 0, 'square', 0.06, { cut: 400 }); },
@@ -676,9 +686,10 @@ function startDock(first) {
   water = 0; engWater = 0; termShorted = false; air = 1;
   if (fuel > 0) { engine.state = 'running'; engine.report = null; engine.stopIn = 0; }
   gen.on = true; gen.boot = 0; arm.hits = 0;
-  // Gas canisters refilled and topped back up to HORN_CHARGES (new ones go into storage)
-  for (const c of items) if (c.type === 'CANISTER') c.gas = 1;
-  for (let n = items.filter(i => i.type === 'CANISTER').length; n < HORN_CHARGES; n++) items.push({ type: 'CANISTER', where: 'storage', gas: 1 });
+  // Horn charges refilled: one loaded in the horn, the rest topped up in storage (HORN_CHARGES in all)
+  mod('HORN').loaded = 1;
+  for (const c of items) if (c.type === 'CHARGE') { c.gas = 1; c.leak = 0; }
+  for (let n = items.filter(i => i.type === 'CHARGE').length; n < HORN_CHARGES - 1; n++) items.push({ type: 'CHARGE', where: 'storage', gas: 1 });
   hornWaves = [];
   creature.x = CREATURE_HOME[0]; creature.y = CREATURE_HOME[1]; creature.vx = creature.vy = 0;
   // Fresh loot every dive: the bait by the creature, a couple in the trench, most of it in the ruins
@@ -708,6 +719,11 @@ function payQuota() {
   const pay = Math.min(coins, quota - paid);
   if (pay <= 0) return;
   coins -= pay; paid += pay; log(`PAID ${pay} TOWARD QUOTA`, 'good');
+}
+function buyGas() {
+  if (phase !== 'dock' || coins < GAS_COST) return;
+  if (storedParts() >= MAX_PARTS) return log('STORAGE FULL', 'warn');
+  coins -= GAS_COST; items.push({ type: 'GAS', where: 'storage' }); log('BOUGHT A GAS CANISTER', 'good');
 }
 function buyHull() {
   if (phase !== 'dock' || coins < HULL_HIT_COST || sub.hp >= MAX_HP) return;
@@ -864,10 +880,10 @@ function breakPart(id) {
     log('CONTROL PANEL FROZEN', 'bad');
   } else if (id === 'storage') {
     inv.open = false;
-    const lost = items.filter(i => i.where === 'storage' && i.type !== 'CANISTER');
+    const lost = items.filter(i => i.where === 'storage' && i.type !== 'CHARGE');
     if (lost.length) { const it = lost[Math.floor(Math.random() * lost.length)]; items.splice(items.indexOf(it), 1); log(`STORAGE HIT - LOST A ${ITEM_TYPES[it.type].short}`, 'bad'); }
     else log('STORAGE BROKEN', 'bad');
-    if (canisters()) log('GAS CANISTERS LEAKING - PATCH THE STORAGE', 'bad');
+    if (charges()) log('CHARGES LEAKING - GET THEM OUT OF THE STORAGE', 'bad');
   } else if (id === 'pumpMech') log('PUMP MECHANISM BROKEN', 'bad');
   else if (id === 'propeller') log('PROPELLER DESTROYED', 'bad');
 }
@@ -917,6 +933,7 @@ addEventListener('keydown', e => {
     if (e.code === 'Escape') { inv.open = false; grip = null; stopFix(null); }
     if (e.code === 'Space' && mode === 'seated') launch();
     if (e.code === 'KeyH') buyHull();
+    if (e.code === 'KeyB') buyGas();
     if (e.code === 'KeyP') payQuota();
     if (mode === 'seated' && ['Digit1', 'Digit2', 'Digit3'].includes(e.code)) toggleSystem(['sonar', 'pump', 'lights'][+e.code[5] - 1]);
     if (e.code === 'KeyQ') fireHorn();
@@ -943,7 +960,7 @@ cv.addEventListener('mousedown', e => {
   if (inv.open) {
     const b = invButtons.find(b => mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h);
     if (b && b.m) { carry = b.m; carry.carried = true; log(`TOOK ${carry.id}`, 'good'); SFX.clink(); }
-    else if (b && b.type) { const it = items.find(i => i.where === 'storage' && i.type === b.type); it.where = 'hand'; carry = it; log(`TOOK A ${ITEM_TYPES[b.type].short}`, 'good'); SFX.clink(); }
+    else if (b && b.type) { const it = items.filter(i => i.where === 'storage' && i.type === b.type).sort((x, y) => (y.gas ?? 1) - (x.gas ?? 1))[0]; it.where = 'hand'; carry = it; log(`TOOK A ${ITEM_TYPES[b.type].short}`, 'good'); SFX.clink(); }
     inv.open = false; return;
   }
   mouse.down = true;
@@ -1027,14 +1044,16 @@ function handTarget() {
       hint: `CLICK: INSTALL ${carry.id} IN ${SLOTS[si].name} SLOT${moduleIn(si) ? ' (SWAPS ' + moduleIn(si).id + ' INTO YOUR HAND)' : ''}` };
   }
   if (carry && inStorageArea(h)) {
-    if (parts.storage.broken) return item && item.type === 'METAL' && !docked ? repair('storage', 'STORAGE', 'METAL') : { id: 'store', hint: 'STORAGE BROKEN', can: false };
-    if (item && item.type !== 'CANISTER' && storedParts() >= MAX_PARTS) return { id: 'store', hint: 'STORAGE FULL', can: false };
+    if (parts.storage.broken) return item && item.type === 'METAL' && !docked ? repair('storage', 'STORAGE', 'METAL') : { id: 'store', hint: 'STORAGE BROKEN - PATCH IT WITH A METAL PART', can: false };
+    if (item && item.type !== 'CHARGE' && storedParts() >= MAX_PARTS) return { id: 'store', hint: 'STORAGE FULL', can: false };
     const r = parts.storage.worn ? repair('storage', 'STORAGE', 'METAL') : null;
     return { id: 'store', click: true, can: true, hold: r && r.can ? r.hold : 0, need: r && r.need, game: r && r.can ? r.game : null, name: 'STORAGE', hint: (r && r.can ? r.hint + '   ' : '') + `CLICK: PUT THE ${carriedName(carry)} IN STORAGE` };
   }
   if (dist(h, WHEEL_POS) < WHEEL_R + 3 && !carry) return { id: 'wheel', hint: 'HOLD LMB + CIRCLE: SPIN THE BAY WHEEL (clockwise opens)', grip: true, can: true };
   if (dist(h, CRANK_POS) < CRANK_R + 4 && !carry) return { id: 'crank', hint: 'HOLD LMB + CIRCLE: AIR CRANK', grip: true, can: true };
   if (inRect(h, ENGINE_BOX)) {
+    if (item && item.type === 'GAS') return fuel > 0.99 ? { id: 'refuel', hint: 'TANK FULL', can: false }
+      : { id: 'refuel', hold: POUR_TIME, can: true, hint: `HOLD E: POUR THE GAS IN (+${Math.round(GAS_FUEL * 100)}% FUEL)` };
     if (engine.state === 'running') return { id: 'engine', hint: 'ENGINE RUNNING', can: false };
     if (engine.report === 'fuel') return { id: 'engine', hint: 'NO FUEL', can: false };
     if (engine.report === 'malfunction') {
@@ -1050,15 +1069,16 @@ function handTarget() {
     const m = moduleIn(si);
     if (!m) return { id: 'slot', hint: `${SLOTS[si].name} SLOT EMPTY`, can: false };
     const r = m.broken || m.worn ? repair('slot' + si, m.id, PART_FOR[m.id]) : null;
+    if (item && item.type === 'CHARGE' && m.id === 'HORN' && !m.broken)   // reload the horn
+      return m.loaded > 0 ? { id: 'load', hint: 'HORN ALREADY LOADED', can: false } : { id: 'load', hold: RELOAD_TIME, can: true, hint: 'HOLD E: LOAD THE CHARGE INTO THE HORN' };
     if (carry) return r || { id: 'slot', hint: 'HANDS FULL', can: false };
     return { id: 'slot' + si, slot: si, click: true, can: true, hold: r && r.can ? r.hold : 0, need: r && r.need, game: r && r.can ? r.game : null, name: m.id,
       hint: (r ? r.hint + '   ' : '') + `CLICK: TAKE ${m.id} OUT` };
   }
   if (!carry && inStorageArea(h)) {
-    // Broken storage won't open; damaged storage still opens (click) and can be patched (hold E)
-    if (parts.storage.broken) return repair('storage', 'STORAGE', 'METAL');
-    const r = parts.storage.worn ? repair('storage', 'STORAGE', 'METAL') : null;
-    return { id: 'storage', click: true, can: true, hold: r && r.can ? r.hold : 0, hint: (r ? r.hint + '   ' : '') + 'CLICK: OPEN STORAGE' };
+    // Damaged or broken storage still opens (click: get the leaking charges out!) and can be patched (hold E at the dock)
+    const r = parts.storage.broken || parts.storage.worn ? repair('storage', 'STORAGE', 'METAL') : null;
+    return { id: 'storage', click: true, can: true, hold: r && r.can ? r.hold : 0, hint: (r ? r.hint + '   ' : '') + (storageLeaking() ? 'CLICK: OPEN - GET THE CHARGES OUT!' : 'CLICK: OPEN STORAGE') };
   }
   if (inRect(h, PUMP_BOX, 4)) {
     if (parts.pumpMech.dead) return { id: 'pumpMech', hint: 'PUMP EXPLODED - GONE', can: false };
@@ -1074,8 +1094,8 @@ function handTarget() {
     if (it) return { id: 'pickup', it, click: true, can: true, hint: `CLICK: PICK UP THE ${ITEM_TYPES[it.type].name}` };
   }
   // Holding something with nothing to use it on
-  if (item && item.type === 'CANISTER') return { id: 'vent', hold: 1.0, can: air < 1, click: true, hint: `HOLD E: OPEN THE VALVE (+${Math.round(CHARGE_AIR * 100)}% AIR)   CLICK: DROP IT` };
-  if (item) return { id: 'drop', click: true, can: true, hint: `CARRYING A ${ITEM_TYPES[item.type].name} (FIXES ${{ PIPE: 'THE PUMP', FILTER: 'THE AIR GENERATOR', METAL: 'EVERYTHING ELSE' }[item.type]})   CLICK: DROP IT` };
+  if (item && item.type === 'CHARGE') return { id: 'vent', hold: 1.0, can: air < 1, click: true, hint: `CHARGE: LOAD IT INTO THE HORN, OR HOLD E: OPEN THE VALVE (+${Math.round(CHARGE_AIR * 100 * (item.gas ?? 1))}% AIR)   CLICK: DROP IT` };
+  if (item) return { id: 'drop', click: true, can: true, hint: `CARRYING A ${ITEM_TYPES[item.type].name} (${{ PIPE: 'FIXES THE PUMP', FILTER: 'FIXES THE AIR GENERATOR', METAL: 'FIXES EVERYTHING ELSE', GAS: 'POUR IT INTO THE ENGINE' }[item.type]})   CLICK: DROP IT` };
   if (carry) return { id: 'carrying', hint: `CARRYING ${carry.id} - CLICK A RED SLOT OR THE STORAGE`, can: false };
   return null;
 }
@@ -1083,7 +1103,18 @@ function holdAction(t) {
   const id = t.id;
   // Used-up part leaves the hand
   if (t.need && phase !== 'dock' && isItem(carry) && carry.type === t.need) { items.splice(items.indexOf(carry), 1); carry = null; }
-  if (id === 'vent') return ventCanister();
+  if (id === 'vent') return ventCharge();
+  if (id === 'refuel') {
+    items.splice(items.indexOf(carry), 1); carry = null;
+    fuel = Math.min(1, fuel + GAS_FUEL); SFX.pour();
+    if (engine.state === 'off' && engine.report === 'fuel') engine.report = 'prevention';   // dry engine: just restart it now
+    return log(`REFUELED: ${Math.round(fuel * 100)}%`, 'good');
+  }
+  if (id === 'load') {
+    const h = mod('HORN'); h.loaded = carry.gas ?? 1;
+    items.splice(items.indexOf(carry), 1); carry = null; SFX.clunk();
+    return log('HORN LOADED', 'good');
+  }
   if (id === 'engine') { engine.state = 'running'; engine.report = null; log('ENGINE RESTARTED', 'good'); SFX.starter(); return; }
   if (id === 'breaker') { gen.on = !gen.on; if (gen.on) gen.boot = BOOT_TIME; else log('POWER CUT', 'warn'); SFX.breaker(); return; }
   // Repairs clear both stages (damaged and broken)
@@ -1395,10 +1426,9 @@ function fireHorn() {
   if (sub.dead || mode !== 'seated' || !panelOk() || phase !== 'dive') return;
   if (h.slot < 0 || h.carried) return log('NO HORN MODULE INSTALLED', 'warn');
   if (h.broken) return log('HORN MODULE BROKEN', 'bad');
-  if (canisters() <= 0) return log('HORN: NO GAS CANISTERS IN STORAGE', 'bad');
-  // Uses the fullest canister; a half-leaked one gives a weaker blast
-  const can = storedCanisters().reduce((a, b) => b.gas > a.gas ? b : a), power = Math.max(0.3, can.gas);
-  items.splice(items.indexOf(can), 1);
+  if (h.loaded <= 0) { SFX.dry(); return log(`HORN EMPTY - RELOAD IT (${charges()} CHARGES IN STORAGE)`, 'bad'); }
+  // Fires the loaded charge; a half-leaked one gives a weaker blast. Then someone has to reload it by hand.
+  const power = Math.max(0.3, h.loaded); h.loaded = 0;
   const o = subPoint(SLOTS[h.slot].c), a = slotFacing(h.slot);
   // Did the cone catch the creature? It gets shoved when the wave reaches it.
   const dx = creature.x - o.x, dy = creature.y - o.y, d = Math.hypot(dx, dy) || 1;
@@ -1407,7 +1437,7 @@ function fireHorn() {
   hornWaves.push({ x: o.x, y: o.y, a, t: time, hit });
   sub.vx -= Math.cos(a) * HORN_RECOIL; sub.vy -= Math.sin(a) * HORN_RECOIL;
   kick(SHAKE_WALL, 0); SFX.horn();
-  log(`HORN FIRED (${canisters()} CANISTERS LEFT)`, 'warn');
+  log(`HORN FIRED - RELOAD IT (${charges()} CHARGES IN STORAGE)`, 'warn');
 }
 function updateHorn(dt) {
   for (const w of hornWaves) {
@@ -1434,22 +1464,24 @@ function drawHornWaves(S, k) {
   }
   ctx.globalAlpha = 1;
 }
-// Open a carried gas canister's valve: emergency air (the canister is used up)
-function ventCanister() {
+// Open a carried charge's valve: it's compressed air, so it's emergency air (the charge is used up)
+function ventCharge() {
   const gas = carry.gas ?? 1;
   items.splice(items.indexOf(carry), 1); carry = null;
   air = Math.min(1, air + CHARGE_AIR * gas);
-  SFX.vent(); log(`VENTED A CANISTER: +${Math.round(CHARGE_AIR * 100)}% AIR`, 'good');
+  SFX.vent(); log(`VENTED A CHARGE: +${Math.round(CHARGE_AIR * gas * 100)}% AIR`, 'good');
 }
 
-// Broken storage: the canister rack is cracked and the stored canisters bleed out one at a time into the cabin
-// (a bit of free air, but you lose horn blasts you didn't choose to spend). Patching the storage stops it.
-function updateCanisters(dt) {
+// Broken storage: the charge rack is cracked and every charge still in it bleeds out in 5 to 8 s (into the cabin air).
+// Carry them out to save them; a charge outside the storage stops leaking.
+function updateCharges(dt) {
   if (!storageLeaking()) return;
-  const c = storedCanisters().reduce((a, b) => b.gas < a.gas ? b : a);   // the one already leaking
-  const d = Math.min(c.gas, dt / CANISTER_LEAK_TIME);
-  c.gas -= d; air = Math.min(1, air + CHARGE_AIR * d);
-  if (c.gas <= 0.001) { items.splice(items.indexOf(c), 1); log(`A GAS CANISTER LEAKED EMPTY (${canisters()} LEFT)`, 'bad'); }
+  for (const c of storedCharges()) {
+    c.leak = c.leak || CHARGE_LEAK[0] + Math.random() * (CHARGE_LEAK[1] - CHARGE_LEAK[0]);
+    const d = Math.min(c.gas, dt / c.leak);
+    c.gas -= d; air = Math.min(1, air + CHARGE_AIR * d);
+    if (c.gas <= 0.001) { items.splice(items.indexOf(c), 1); log(`A CHARGE LEAKED EMPTY (${charges()} LEFT IN STORAGE)`, 'bad'); }
+  }
 }
 function updateBalloons(dt) {
   for (const r of relics) {
@@ -1615,7 +1647,7 @@ function update(dt) {
   updateArm(dt);
   updateHorn(dt);
   updateItems(dt);
-  updateCanisters(dt);
+  updateCharges(dt);
   updateSnow(dt);
   const zt = mode === 'seated' ? 0 : 1;
   zoomT += Math.sign(zt - zoomT) * Math.min(Math.abs(zt - zoomT), dt / ZOOM_TIME);
@@ -2033,7 +2065,7 @@ function waterBody(clipFn, x0, x1, surfAt) {
 // The cabin waterline catches a little light even in the dark, so you can always read how high it is.
 // Drawn after the light map (additive), before the fog.
 function waterSheen() {
-  if (storageLeaking()) {   // gas jetting out of the cracked canister rack (also catches a little light)
+  if (storageLeaking()) {   // air jetting out of the cracked charge rack (also catches a little light)
     ctx.save(); ctx.globalCompositeOperation = 'lighter';
     for (let i = 0; i < 9; i++) {
       const k = (time * 1.4 + i / 9) % 1; ctx.fillStyle = `rgba(90,105,110,${0.35 * (1 - k)})`;
@@ -2537,10 +2569,10 @@ function renderTerminal(L) {
   // Horn: fires on compressed air, so it works without power (but not with a frozen panel)
   {
     const h = mod('HORN'), ok = h.slot >= 0 && !h.carried && !h.broken, bw = w - 20;
-    const hc = canisters();
-    ctx.fillStyle = ok && hc ? '#432' : '#222'; ctx.fillRect(x + 10, ly - 12, bw, 18);
-    ctx.fillStyle = ok && hc ? '#fa4' : '#777';
-    ctx.fillText(`[Q] FIRE HORN  ${'#'.repeat(Math.min(hc, HORN_CHARGES))}${'.'.repeat(Math.max(0, HORN_CHARGES - hc))}  ${!ok ? (h.broken ? 'MODULE BROKEN' : 'NOT INSTALLED') : SLOTS[h.slot].name + ' SIDE'}`, x + 14, ly + 1);
+    const live = ok && h.loaded > 0;
+    ctx.fillStyle = live ? '#432' : '#222'; ctx.fillRect(x + 10, ly - 12, bw, 18);
+    ctx.fillStyle = live ? '#fa4' : '#777';
+    ctx.fillText(`[Q] FIRE HORN  ${h.loaded > 0 ? 'LOADED' : 'EMPTY'} +${charges()}  ${!ok ? (h.broken ? 'MODULE BROKEN' : 'NOT INSTALLED') : SLOTS[h.slot].name + ' SIDE'}`, x + 14, ly + 1);
     termButtons.push({ id: 'horn', x: x + 10, y: ly - 12, w: bw, h: 18 });
     ly += 24;
   }
@@ -2572,12 +2604,13 @@ function drawInventory() {
   const W = cv.width, H = cv.height;
   const cards = [...modules.filter(m => m.slot < 0 && !m.carried).map(m => ({ m, label: m.id, sub: m.broken ? 'BROKEN' : 'MODULE', bad: m.broken })),
                  ...Object.keys(ITEM_TYPES).filter(t => storedOf(t)).map(t => ({ type: t, label: `${ITEM_TYPES[t].short} x${storedOf(t)}`,
-                   sub: t === 'CANISTER' && storedCanisters().some(c => c.gas < 0.99) ? 'ONE PART EMPTY' : ITEM_TYPES[t].name }))];
+                   sub: t === 'CHARGE' && storageLeaking() ? 'LEAKING!' : t === 'CHARGE' && storedCharges().some(c => c.gas < 0.99) ? 'ONE PART EMPTY' : ITEM_TYPES[t].name,
+                   bad: t === 'CHARGE' && storageLeaking() }))];
   const cw = 100, w = Math.max(420, 28 + cards.length * (cw + 10)), h = 210, x = (W - w) / 2, y = (H - h) / 2;
   ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, W, H);
   rect([x, y, w, h], '#2a1f10', '#a0601a');
   ctx.textAlign = 'left'; ctx.font = 'bold 14px monospace'; ctx.fillStyle = '#ffb040'; ctx.fillText('STORAGE', x + 14, y + 24);
-  ctx.font = '12px monospace'; ctx.fillStyle = '#ddd'; ctx.fillText(`SPARE PARTS ${storedParts()}/${MAX_PARTS}    GAS CANISTERS ${canisters()}/${HORN_CHARGES}`, x + 14, y + 44);
+  ctx.font = '12px monospace'; ctx.fillStyle = '#ddd'; ctx.fillText(`SPARE PARTS + GAS ${storedParts()}/${MAX_PARTS}    HORN CHARGES ${charges()}`, x + 14, y + 44);
   invButtons = [];
   cards.forEach((c, i) => {
     const bx = x + 14 + i * (cw + 10), by = y + 62;
@@ -2665,9 +2698,13 @@ function drawItemIcon(type, x, y) {
   } else if (type === 'METAL') {  // a piece of metal: bent plate with bolt holes
     ctx.fillStyle = '#7a7268'; ctx.beginPath(); ctx.moveTo(-3.5, 1.5); ctx.lineTo(-2.5, -1.8); ctx.lineTo(3.2, -1.2); ctx.lineTo(3.6, 1.8); ctx.closePath(); ctx.fill(); ctx.stroke();
     ctx.fillStyle = '#1a1816'; for (const [bx, by] of [[-1.8, 0], [2, 0.3]]) { ctx.beginPath(); ctx.arc(bx, by, 0.45, 0, Math.PI * 2); ctx.fill(); }
-  } else {                       // gas canister: an upright bottle with a valve
-    ctx.fillStyle = '#8a5a22'; ctx.fillRect(-1.6, -3, 3.2, 6); ctx.strokeRect(-1.6, -3, 3.2, 6);
-    ctx.fillStyle = '#c8b070'; ctx.fillRect(-1.6, -1, 3.2, 0.7);
+  } else if (type === 'GAS') {    // gas canister: a red jerrycan with a spout
+    ctx.fillStyle = '#8a2a1e'; ctx.fillRect(-2.6, -2.4, 5.2, 5.4); ctx.strokeRect(-2.6, -2.4, 5.2, 5.4);
+    ctx.strokeStyle = 'rgba(255,200,180,0.35)'; ctx.beginPath(); ctx.moveTo(-2, -1.6); ctx.lineTo(2, 2.4); ctx.moveTo(2, -1.6); ctx.lineTo(-2, 2.4); ctx.stroke();
+    ctx.fillStyle = '#3a3a3a'; ctx.fillRect(1, -3.6, 1.2, 1.2); ctx.fillRect(-2, -3.2, 2.2, 0.8);
+  } else {                       // shockwave charge: a steel compressed-air bottle with a valve
+    ctx.fillStyle = '#5a6a76'; ctx.fillRect(-1.6, -3, 3.2, 6); ctx.strokeRect(-1.6, -3, 3.2, 6);
+    ctx.fillStyle = '#d0a040'; ctx.fillRect(-1.6, -1, 3.2, 0.7);
     ctx.fillStyle = '#4a4a4a'; ctx.fillRect(-0.6, -4.2, 1.2, 1.2);
   }
   ctx.restore();
@@ -2678,7 +2715,7 @@ let title = location.hash !== '#play', showDebug = false;
 function startGame() { title = false; initAudio(); }
 const CONTROLS = [
   ['SEATED (AT THE CHAIR)', [['W A S D', 'steer'], ['LMB', 'directional sonar ping'], ['RMB', 'all-around sonar ping'], ['E (hold)', 'robot arm grabs where you aim'],
-                             ['Q', 'horn (one gas canister)'], ['1  2  3', 'sonar / pump / lights'], ['SPACE', 'dive (at the dock)'], ['F', 'stand up']]],
+                             ['Q', 'horn (fires its loaded charge)'], ['1  2  3', 'sonar / pump / lights'], ['SPACE', 'dive (at the dock)'], ['F', 'stand up']]],
   ['STANDING', [['A / D', 'walk'], ['MOUSE', 'your hand'], ['LMB', 'grab / click'], ['E', 'use / repair'], ['F', 'sit (by the chair)'], ['ESC', 'close / stop']]],
   ['ANYTIME', [['H', 'buy hull (dock)'], ['P', 'pay quota (dock)'], ['TAB', 'show controls'], ['ENTER', 'dismiss a tip'], ['M', 'sound on / off'], ['G', 'graphics high / low'], ['`', 'debug readout']]],
 ];
@@ -2713,17 +2750,18 @@ const TIPS = {
   dive: 'SONAR IS YOUR ONLY EYES. RMB: all-around ping (rough). LMB: directional ping from the sonar module (sharp, but only where its slot faces). WASD steers, F stands you up.',
   stand: 'STANDING. A/D walk, the mouse is your hand. LMB grabs and clicks, E uses. You only see the way you face. F sits you back down at the chair.',
   loot: 'YELLOW BLIP = LOOT. Hold E and point at it on the sonar: the arm grabs it. Relics float up on a balloon and pay out. Scrap gets dropped inside.',
-  creature: 'SOMETHING BIG ON SONAR. Touching it wrecks the engine. The horn shoves it away (Q, one gas canister per blast), but the HORN module starts in storage: install it in a slot first.',
+  creature: 'SOMETHING BIG ON SONAR. Touching it wrecks the engine. The horn shoves it away (Q), but the HORN module starts in storage: install it in a slot first.',
+  reload: 'HORN EMPTY. It holds one charge. Reload it by hand: take a CHARGE from storage, touch the horn module, hold E.',
   damaged: "SOMETHING'S DAMAGED (check the terminal). Stand up, open the storage (orange, top right), take the matching part, touch the broken thing, press E. PIPE = pump, FILTER = air generator, METAL = the rest.",
   floor: 'SCRAP ON THE FLOOR. Stand up, click it to pick it up, click the storage to stow it. Loose parts slide around when the sub tilts.',
   malfunction: 'MALFUNCTION: the engine room is flooded behind its door. Open it and that water pours into the cabin, so get the pump running first (2 at the terminal).',
   engine: "ENGINE'S OFF. Walk to the back, spin the yellow wheel (hold LMB, circle the mouse) to open the bay, touch the engine, press E.",
   water: "WATER COMING IN. Pump it out (2 at the terminal, the pump only works in the floor slot). Over 40% shorts the terminal. Don't let the pump run dry: it blows up.",
   power: "POWER'S OUT. The terminal dies in 7 s, the lights in 30 s, and without the air generator you have about a minute of air.",
-  air: 'AIR FALLING. The air generator needs power and a slot. The crank on the wall (circle the mouse on it) slows the loss. A gas canister in your hand: hold E for +30% air.',
+  air: 'AIR FALLING. The air generator needs power and a slot. The crank on the wall (circle the mouse on it) slows the loss. A CHARGE is compressed air: hold one and hold E for +15% air (but that is a horn blast gone).',
   frozen: "PANEL FROZEN. Everything's stuck the way it was, throttle too. Cut the power at the breaker in the engine bay, then fix the panel with a METAL part.",
-  storage: 'STORAGE BROKEN. It won\'t open, and the gas canisters inside are bleeding out. Patch it with a METAL part (loose scrap on the floor counts).',
-  fuel: "FUEL LOW. When it's gone the engine stops for good. Head up.",
+  storage: 'STORAGE BROKEN. The horn charges inside are leaking out and will be empty in seconds. Open it and carry them out, one at a time. Patch it with a METAL part.',
+  fuel: "FUEL LOW. Pour a GAS CANISTER into the engine (hold it, touch the engine, hold E) for +33%. No gas left? Head up.",
 };
 let tipSeen = {}, tipQueue = [], tipNow = null, tipClock = 0;
 try { tipSeen = JSON.parse(localStorage.getItem('atlantisSubTips') || '{}'); } catch (e) {}
@@ -2748,6 +2786,7 @@ function checkTips() {
   if (parts.panel.broken) showTip('frozen');
   if (parts.storage.broken) showTip('storage');
   if (fuel < 0.25) showTip('fuel');
+  if (mod('HORN').loaded <= 0 && mod('HORN').slot >= 0) showTip('reload');
 }
 function updateTips(dt) {
   if ((tipClock -= dt) <= 0) { checkTips(); tipClock = 0.25; }
@@ -2781,7 +2820,7 @@ function drawTip() {
   ctx.restore();
 }
 const DEATH_HINTS = {
-  'SUFFOCATED': 'the air generator needs power and a slot; the crank and gas canisters buy you time',
+  'SUFFOCATED': 'the air generator needs power and a slot; the crank and venting a horn charge buy you time',
   'FLOODED': 'run the pump early, and keep the bay door shut after a malfunction until the pump is going',
   'HULL IMPLODED': 'slow down near walls, and buy hull at the dock (H)',
   'QUOTA MISSED': 'pay the quota at the dock (P); the ruins at the bottom pay the most',
@@ -2849,14 +2888,17 @@ function drawOverlays(W, H) {
   ctx.fillStyle = '#ddd';
   const left = DIVES_PER_QUOTA - (divesDone % DIVES_PER_QUOTA);
   ctx.fillText(`QUOTA ${paid}/${quota}  due in ${left} dive${left > 1 ? 's' : ''}`, 16, 128);
-  ctx.fillText(`STORED: METAL ${storedOf('METAL')}  PIPE ${storedOf('PIPE')}  FILTER ${storedOf('FILTER')}  GAS ${canisters()}`, 16, 146);
+  ctx.fillText(`PARTS: METAL ${storedOf('METAL')}  PIPE ${storedOf('PIPE')}  FILTER ${storedOf('FILTER')}`, 16, 146);
+  ctx.fillText(`GAS ${storedOf('GAS')}  CHARGES ${charges()}  `, 16, 164);
+  const hl = mod('HORN').loaded > 0; ctx.fillStyle = hl ? '#fa4' : '#e44';
+  ctx.fillText(hl ? 'HORN LOADED' : 'HORN EMPTY', 16 + ctx.measureText(`GAS ${storedOf('GAS')}  CHARGES ${charges()}  `).width, 164);
   ctx.fillStyle = arm.broken ? '#e44' : arm.hits ? '#fa3' : '#4c8';
-  ctx.fillText(arm.broken ? 'ARM BROKEN' : arm.hits ? 'ARM HIT' : 'ARM OK', 16, 164);
+  ctx.fillText(arm.broken ? 'ARM BROKEN' : arm.hits ? 'ARM HIT' : 'ARM OK', 16, 182);
 
   ctx.textAlign = 'center'; ctx.font = 'bold 14px monospace';
   if (phase === 'dock') {
     ctx.fillStyle = '#9cf';
-    ctx.fillText(`DOCKED - FREE REPAIRS ${Math.ceil(dockT)}s - SPACE (seated) to dive - H: hull +${HIT_DAMAGE} (${HULL_HIT_COST}c) - P: pay quota`, W / 2, 20);
+    ctx.fillText(`DOCKED - FREE REPAIRS ${Math.ceil(dockT)}s - SPACE (seated) to dive - H: hull +${HIT_DAMAGE} (${HULL_HIT_COST}c) - B: gas can (${GAS_COST}c) - P: pay quota`, W / 2, 20);
   } else { ctx.fillStyle = '#7ab'; ctx.fillText(`DIVE ${divesDone + 1}   DEPTH ${(sub.y / 10).toFixed(0)} m`, W / 2, 20); }
   ctx.fillStyle = mode === 'seated' ? '#9cf' : '#fc6';
   ctx.fillText(mode === 'seated' ? 'SEATED' : 'STANDING', W / 2, 40);
