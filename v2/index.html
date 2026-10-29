@@ -96,14 +96,15 @@ const PART_MASS        = 0.12; // extra inertia per spare part aboard
 const SCRAP_SIZE       = 10;
 const SCRAP_GRAB_TIME  = 0.6;
 const SCRAP_PER_DIVE   = 6;
-// Dives + quota
-const DOCK_TIME        = 60;   // free repair minute at the start of each dive
-const DIVES_PER_QUOTA  = 3;
-const QUOTA_START      = 600;
-const QUOTA_GROWTH     = 1.35;
+// The run: a descent shaft, then a procedural cave to the right, Atlantis at the end
+const SHAFT_DEPTH      = 3200; // px from the surface to the first checkpoint (the bottom of the shaft)
+const CAVE_SEGMENTS    = 16;   // cave segments between the first checkpoint and Atlantis
+const SEGMENTS_PER_CHECKPOINT = 4;  // a checkpoint after every this many segments
+const CHECKPOINT_RADIUS= 170;  // reach a checkpoint by getting this close to its middle
+const ATLANTIS_RADIUS  = 320;  // ...and Atlantis (the end of the run) by getting this close
+const CAVE_CELL        = 8;    // px per node of the hidden cave grid
 const HULL_FREE_FRACTION = 0.51; // free hull repair between dives only goes up to this
 const HULL_HIT_COST    = 100;  // coins for +1 hit (HIT_DAMAGE hp) of hull at the dock
-const DIVE_RETURN_Y    = 160;  // come back above this to end a dive
 const DIVE_MIN_DEPTH   = 500;  // ...after having been at least this deep
 // Sonar
 const DOT_FADE_TIME = 6.0;
@@ -130,7 +131,7 @@ const SONAR_DIST_FADE= 0.75;
 const SONAR_BLOB     = 11;    // px (world), glow radius of one return
 const SONAR_NOISE    = 3;
 const SONAR_FLICKER  = 0.3;
-const SONAR_COLOR    = '#7ef';  // wavefront / echo specks
+const SONAR_COLOR    = '#d8d8d8';  // wavefront / echo specks (the sonar has no colours)
 const MAX_DOTS       = 6000;
 const SONAR_BLOB_ALPHA = 0.5;
 const SONAR_NEAR_THIN  = 220;  // px: wall returns closer than this get thinned out (keeps blob spacing even at any range)  // per-return brightness; overlaps add up, so lower = less blown-out when you ping one spot a lot
@@ -204,6 +205,9 @@ const STAND_UP_TIME  = 0.5;
 // One fixed level. Built from a seeded random so it's identical every run (hand-shaped, just not hand-typed).
 // A wide mouth narrows into a tight throat where the creature waits, then opens into the Atlantis cavern.
 // Everything solid is a polygon: { pts, kind ('rock' | 'ruin'), bbox x0..x1 / y0..y1, segs (edges + tangents) }.
+// The old fixed trench is a hidden test level: add #trench to the URL. The real game is the procedural run below.
+const TEST_TRENCH = /trench/.test(location.hash);
+let LV = null;          // the procedural level, once built (null = the trench)
 let seed = 20261027;
 const srand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
 const LEVEL_W = 2000, LEVEL_BOTTOM = 5900;
@@ -301,7 +305,8 @@ for (let i = 0; i < 3; i++) box(RX - 800 + i * 31, F - 445, 18, 26);
 addSolid([[RX + 200, F + 40], [RX + 200, F - 80], [RX + 230, F - 100], [RX + 260, F - 70], [RX + 290, F - 115], [RX + 310, F - 60], [RX + 310, F + 40]], 'ruin');
 
 // ----- Placing things -----
-function solidAt(x, y) {
+const solidAt = (x, y) => LV ? caveSolidAt(x, y) : trenchSolidAt(x, y);
+function trenchSolidAt(x, y) {
   for (const s of SOLIDS) if (x > s.x0 && x < s.x1 && y > s.y0 && y < s.y1 && inPoly({ x, y }, s.pts)) return true;
   return false;
 }
@@ -366,12 +371,254 @@ const RAIL = [[-53, 7], [-17, 56], [116, 56], [123, 18]];
 const SUB_BOXES = [[-120, -51, 71, 52], [-49, -51, 17, 52], [-32, -51, 152, 102]];
 const MODULE_COLORS = { SONAR: '#1b2b22', PUMP: '#1b2238', HORN: '#2e2a1b', AIR: '#1b2e2e' };
 
+// ===================== THE RUN: DESCENT SHAFT + PROCEDURAL CAVE =====================
+// Built once per run from a seed. A path is walked from the surface: straight-ish down the shaft, then segment after
+// segment to the right. Every 8 px along that path the sub's own box (plus that segment's clearance) is carved out of
+// solid rock, so the path is always passable; extra carving around it makes the walls. Everything stays solid unless
+// carved. Rock lives in a hidden grid: nobody draws it, the sonar is the only way to see it.
+// Each segment is an entry -> exit chain of waypoints, so any segment can follow any other.
+const SEG_TYPES = ['squeeze', 'open', 'drop', 'climb', 'deadend', 'crystal'];
+const SEG_NAMES = { shaft: 'DESCENT SHAFT', squeeze: 'SQUEEZE', open: 'OPEN CAVERN', drop: 'FLOODED DROP', climb: 'CLIMB', deadend: 'DEAD END', crystal: 'CRYSTAL ROOM', atlantis: 'ATLANTIS' };
+const SEG_WEIGHTS = { squeeze: 3, open: 2, drop: 2, climb: 2, deadend: 1, crystal: 1 };
+let runSeed = +((location.hash.match(/seed=(\d+)/) || [])[1]) || (Math.random() * 1e9 | 0);
+let forcedSegment = null;   // forceSegment(type): the first cave segment is this type
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+// One segment: waypoints from the entry, how much room the path gets (cx, cy on top of the sub's half size),
+// and the extra carving that shapes its walls (never adds rock, so the path stays clear)
+function makeSegment(type, [ex, ey], R) {
+  const rr = (a, b) => a + R() * (b - a), ph = R() * 9, wob = (t, f) => 0.5 + 0.3 * Math.sin(t / f + ph) + 0.2 * Math.sin(t / (f * 0.37) + ph * 2);
+  const ell = (rx, ry) => (x, y, t, f) => ({ k: 'ell', x, y, rx: rx(t, f), ry: ry(t, f) });
+  const taper = f => Math.sin(Math.PI * clamp(f, 0, 1));   // walls pinch in at the ends so segments join cleanly
+  if (type === 'squeeze') {   // narrow tunnel: barely the sub's height, easy to scrape
+    const L = rr(500, 800), dy = rr(-40, 160), w = rr(-35, 35);
+    return { way: [[ex, ey], [ex + L * 0.33, ey + dy * 0.3 + w], [ex + L * 0.66, ey + dy * 0.7 - w], [ex + L, ey + dy]], cx: 6, cy: 6, every: 3,
+             extra: ell(t => 134 + 10 * wob(t, 40), t => 65 + 10 * wob(t, 30)) };
+  }
+  if (type === 'open') {      // wide cavern: mostly safe, more loot
+    const L = rr(700, 1000), dy = rr(-100, 200);
+    const my = ey + dy * 0.5 + rr(-60, 60);
+    return { way: [[ex, ey], [ex + 80, ey], [ex + L * 0.5, my], [ex + L - 80, ey + dy], [ex + L, ey + dy]], cx: 30, cy: 30, every: 4, loot: 3,
+             big: { k: 'ell', x: ex + L * 0.5, y: my - rr(20, 80), rx: L * 0.42, ry: rr(240, 340) },   // the cavern itself
+             extra: ell((t, f) => 170 + 120 * wob(t, 120) * taper(f), (t, f) => 90 + 200 * wob(t, 90) * taper(f)) };
+  }
+  if (type === 'drop') {      // steep downhill
+    const dx = rr(260, 420), dy = rr(550, 850);
+    return { way: [[ex, ey], [ex + 90, ey + 40], [ex + dx * 0.45, ey + dy * 0.5], [ex + dx * 0.8, ey + dy], [ex + dx, ey + dy]], cx: 25, cy: 18, every: 3,
+             extra: ell(t => 160 + 40 * wob(t, 60), t => 80 + 40 * wob(t, 50)) };
+  }
+  if (type === 'climb') {     // rising section
+    const dx = rr(420, 620), dy = -rr(280, 440);
+    return { way: [[ex, ey], [ex + 100, ey], [ex + dx * 0.5, ey + dy * 0.55], [ex + dx - 80, ey + dy], [ex + dx, ey + dy]], cx: 25, cy: 18, every: 3,
+             extra: ell(t => 160 + 40 * wob(t, 60), t => 80 + 40 * wob(t, 50)) };
+  }
+  if (type === 'deadend') {   // the tunnel ends: turn around, the way on is back left and down (a switchback)
+    return { way: [[ex, ey], [ex + 560, ey], [ex + 560, ey + 270], [ex + 120, ey + 270], [ex + 120, ey + 530], [ex + 260, ey + 530]], cx: 16, cy: 12, every: 3,
+             extra: ell(t => 145 + 8 * wob(t, 40), t => 72 + 8 * wob(t, 30)) };
+  }
+  // crystal room: tight, with sharp teeth along its ceiling and floor (radial sonar in here burns the transducer)
+  const L = rr(380, 480), dy = rr(-30, 30);
+  return { way: [[ex, ey], [ex + L, ey + dy]], cx: 14, cy: 10, every: 99, room: { x0: ex + 30, x1: ex + L - 30, y0: ey, y1: ey + dy, depth: 44, period: 30 } };
+}
+function pickSegment(R, prev, i) {
+  if (i === 0 && forcedSegment) return forcedSegment;
+  let types = SEG_TYPES.filter(t => !(i === 0 && (t === 'deadend' || t === 'crystal')));
+  if (prev === 'deadend') types = ['squeeze', 'drop'];   // nothing may rise back into the switchback above
+  const tot = types.reduce((a, t) => a + SEG_WEIGHTS[t], 0);
+  let r = R() * tot; for (const t of types) if ((r -= SEG_WEIGHTS[t]) < 0) return t;
+  return types[0];
+}
+function buildLevel(seedIn) {
+  LV = null;
+  if (TEST_TRENCH) return;
+  const R = mulberry(seedIn), rr = (a, b) => a + R() * (b - a);
+  const HX = SUB_HALF[0] + CAVE_CELL, HY = SUB_HALF[1] + CAVE_CELL;   // sub half size + one grid cell (walls are sampled)
+  const ops = [], pts = [], segs = [], checkpoints = [], lootSpots = [], scrapSpots = [];
+  let s = 0;
+  // Walk waypoints, a sample every 8 px: each carves the sub's box (+clearance); every Nth also gets the wall shape
+  const walk = (way, segIdx, cx, cy, every, extra) => {
+    const startN = pts.length, total = way.slice(1).reduce((a, p, i) => a + Math.hypot(p[0] - way[i][0], p[1] - way[i][1]), 0);
+    let along = 0;
+    for (let i = 1; i < way.length; i++) {
+      const [ax, ay] = way[i - 1], [bx, by] = way[i], L = Math.hypot(bx - ax, by - ay), n = Math.max(1, Math.ceil(L / 8));
+      for (let j = 1; j <= n; j++) {
+        const x = ax + (bx - ax) * j / n, y = ay + (by - ay) * j / n, last = pts[pts.length - 1];
+        if (last) s += Math.hypot(x - last.x, y - last.y);
+        along += L / n;
+        pts.push({ x, y, seg: segIdx, s });
+        ops.push({ k: 'rect', x, y, hx: HX + cx, hy: HY + cy });
+        if (extra && (pts.length - startN) % every === 0) ops.push(extra(x, y, along, along / total));
+      }
+    }
+  };
+  // Surface water, then the shaft
+  const x0 = 1000, start = { x: x0, y: -80 };
+  ops.push({ k: 'rect', x: x0, y: -700, hx: 1000, hy: 500 });
+  const shaft = [[x0, -300]];
+  for (let y = 300; y < SHAFT_DEPTH - 200; y += 400) shaft.push([x0 + rr(-160, 160), y]);
+  shaft.push([x0 + rr(-60, 60), SHAFT_DEPTH]);
+  segs.push({ type: 'shaft', s0: 0 });
+  walk(shaft, 0, 60, 30, 4, (x, y, t) => ({ k: 'ell', x, y, rx: 200 + 70 * (0.5 + 0.5 * Math.sin(t / 230)), ry: 90 }));
+  const chamber = ([x, y]) => ops.push({ k: 'ell', x, y, rx: 300, ry: 170 });
+  let e = shaft[shaft.length - 1];
+  checkpoints.push({ x: e[0], y: e[1], s }); chamber(e);
+  // The cave
+  let prev = null;
+  for (let i = 0; i < CAVE_SEGMENTS; i++) {
+    const type = pickSegment(R, prev, i), g = makeSegment(type, e, R), segIdx = segs.length;
+    segs.push({ type, s0: s });
+    walk(g.way, segIdx, g.cx, g.cy, g.every, g.extra);
+    if (g.room) ops.push({ k: 'teeth', ...g.room, half: HY + g.cy + g.room.depth });
+    if (g.big) ops.push(g.big);
+    const mine = pts.filter(p => p.seg === segIdx);
+    for (let k = 0; k < (g.loot || (R() < 0.4 ? 1 : 0)); k++) { const p = mine[Math.floor(mine.length * (k + 1) / ((g.loot || 1) + 1))]; lootSpots.push({ x: p.x + rr(-60, 60), y: p.y, seg: segIdx }); }
+    if (R() < 0.7) { const p = mine[Math.floor(R() * mine.length)]; scrapSpots.push({ x: p.x, y: p.y }); }
+    e = g.way[g.way.length - 1]; prev = type;
+    if ((i + 1) % SEGMENTS_PER_CHECKPOINT === 0 && i < CAVE_SEGMENTS - 1) { checkpoints.push({ x: e[0], y: e[1], s }); chamber(e); }
+  }
+  // Atlantis: a huge cavern at the end, ruins standing on its floor
+  const A = { x: e[0] + 950, y: e[1] + 120 };
+  segs.push({ type: 'atlantis', s0: s });
+  walk([e, [e[0] + 200, e[1]], [A.x, A.y]], segs.length - 1, 40, 30, 99, null);
+  ops.push({ k: 'ell', x: A.x, y: A.y, rx: 950, ry: 380 });
+  const floorY = A.y + 330, solids = [];
+  for (let c = 0; c < 6; c++) { const h = rr(110, 200), cx = A.x - 700 + c * 260 + rr(-40, 40); solids.push({ k: 'solid', x0: cx - 16, x1: cx + 16, y0: floorY - h, y1: floorY + 200 }); }
+  solids.push({ k: 'solid', x0: A.x + 120, x1: A.x + 420, y0: floorY - 70, y1: floorY + 200 }, { k: 'solid', x0: A.x + 170, x1: A.x + 370, y0: floorY - 120, y1: floorY + 200 });
+  for (let k = 0; k < 6; k++) lootSpots.push({ x: A.x - 760 + k * 300 + rr(-50, 50), y: A.y + 60, seg: segs.length - 1, ruins: true });
+  // Bake: bounds -> grid -> carve -> stamp ruins
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const grow = (a, b, c, d) => { minX = Math.min(minX, a); maxX = Math.max(maxX, b); minY = Math.min(minY, c); maxY = Math.max(maxY, d); };
+  for (const o of ops) o.k === 'rect' ? grow(o.x - o.hx, o.x + o.hx, o.y - o.hy, o.y + o.hy) : o.k === 'ell' ? grow(o.x - o.rx, o.x + o.rx, o.y - o.ry, o.y + o.ry) : grow(o.x0, o.x1, Math.min(o.y0, o.y1) - o.half, Math.max(o.y0, o.y1) + o.half);
+  const C = CAVE_CELL, ox = minX - 400, oy = minY - 400, nx = Math.ceil((maxX - minX + 800) / C) + 1, ny = Math.ceil((maxY - minY + 800) / C) + 1, G = new Uint8Array(nx * ny);
+  const span = (a, b, o) => [Math.max(0, Math.ceil((a - o) / C)), Math.floor((b - o) / C)];
+  for (const o of ops) {
+    if (o.k === 'rect' || o.k === 'ell') {
+      const rx = o.k === 'rect' ? o.hx : o.rx, ry = o.k === 'rect' ? o.hy : o.ry, [i0, i1] = span(o.x - rx, o.x + rx, ox), [j0, j1] = span(o.y - ry, o.y + ry, oy);
+      for (let j = j0; j <= Math.min(j1, ny - 1); j++) for (let i = i0; i <= Math.min(i1, nx - 1); i++) {
+        if (o.k === 'ell') { const u = (ox + i * C - o.x) / rx, v = (oy + j * C - o.y) / ry; if (u * u + v * v > 1) continue; }
+        G[j * nx + i] = 1;
+      }
+    } else {   // crystal teeth: free between triangular spikes that reach in from the ceiling and floor
+      const [i0, i1] = span(o.x0, o.x1, ox);
+      for (let i = i0; i <= Math.min(i1, nx - 1); i++) {
+        const px = ox + i * C, f = (px - o.x0) / (o.x1 - o.x0), my = o.y0 + (o.y1 - o.y0) * f, t = ((px - o.x0) % o.period) / o.period, free = o.half - o.depth * (1 - Math.abs(2 * t - 1));
+        const [j0, j1] = span(my - free, my + free, oy);
+        for (let j = j0; j <= Math.min(j1, ny - 1); j++) G[j * nx + i] = 1;
+      }
+    }
+  }
+  for (const o of solids) { const [i0, i1] = span(o.x0, o.x1, ox), [j0, j1] = span(o.y0, o.y1, oy); for (let j = j0; j <= Math.min(j1, ny - 1); j++) for (let i = i0; i <= Math.min(i1, nx - 1); i++) G[j * nx + i] = 0; }
+  LV = { seed: seedIn, ox, oy, nx, ny, G, pts, segs, checkpoints, start, atlantis: A, length: s };
+  // Guarantee: the sub's box fits at every sample of the path. Anything that doesn't gets carved wider (and is counted).
+  let fixes = 0;
+  for (let pass = 0; pass < 3; pass++) {
+    let bad = 0;
+    for (const p of pts) if (subFitsAt(p.x, p.y) === false) { bad++; carveBox(p.x, p.y, HX + 16, HY + 16); }
+    fixes += bad; if (!bad) break;
+  }
+  LV.fixes = fixes;
+  // Loot sits on whatever floor is below its spot; scrap too. The creature waits under an open cavern's ceiling.
+  LV.relics = lootSpots.map(l => { const [x, y] = settle([l.x, l.y], RELIC_SIZE / 2); return { x, y, value: l.ruins ? RELIC_VALUE_RUINS : segs[l.seg].type === 'open' ? RELIC_VALUE : RELIC_VALUE_UPPER }; });
+  LV.scraps = scrapSpots.map(l => { const [x, y] = settle([l.x, l.y], SCRAP_SIZE / 2); return { x, y, type: SCRAP_MIX[Math.floor(R() * SCRAP_MIX.length)] }; });
+  const caverns = segs.map((g, i) => i).filter(i => segs[i].type === 'open');
+  const ci = caverns.find(i => i > 1) ?? caverns[0] ?? Math.min(segs.length - 2, 6), cp = pts.filter(p => p.seg === ci);
+  let cr = cp[Math.floor(cp.length / 2)], cy = cr.y;
+  for (let k = 0; k < 60 && !caveSolidAt(cr.x, cy - CREATURE_SIZE / 2 - 8); k++) cy -= 8;
+  LV.creature = [cr.x, Math.min(cr.y, cy + 6)];
+}
+const SUB_HALF = [120, 51];   // the sub's collision box, half width / half height (see SUB_BOXES)
+function carveBox(x, y, hx, hy) {
+  const C = CAVE_CELL;
+  for (let j = Math.max(0, Math.ceil((y - hy - LV.oy) / C)); j <= Math.min(LV.ny - 1, Math.floor((y + hy - LV.oy) / C)); j++)
+    for (let i = Math.max(0, Math.ceil((x - hx - LV.ox) / C)); i <= Math.min(LV.nx - 1, Math.floor((x + hx - LV.ox) / C)); i++) LV.G[j * LV.nx + i] = 1;
+}
+// Rock field: 1 = water, 0 = rock, read between grid nodes (so walls are smooth lines, not steps)
+function caveField(x, y) {
+  const fx = (x - LV.ox) / CAVE_CELL, fy = (y - LV.oy) / CAVE_CELL, i = Math.floor(fx), j = Math.floor(fy), nx = LV.nx, G = LV.G;
+  if (i < 0 || j < 0 || i >= nx - 1 || j >= LV.ny - 1) return 0;
+  const u = fx - i, v = fy - j, k = j * nx + i, a = G[k] + (G[k + 1] - G[k]) * u, b = G[k + nx] + (G[k + nx + 1] - G[k + nx]) * u;
+  return a + (b - a) * v;
+}
+const caveSolidAt = (x, y) => caveField(x, y) < 0.5;
+// A box against the cave: any rock along its outline (every 6 px)
+function caveBoxHit(b) {
+  for (let x = b.x; x <= b.x + b.w; x += 6) if (caveSolidAt(x, b.y) || caveSolidAt(x, b.y + b.h)) return true;
+  for (let y = b.y; y <= b.y + b.h; y += 6) if (caveSolidAt(b.x, y) || caveSolidAt(b.x + b.w, y)) return true;
+  return caveSolidAt(b.x + b.w, b.y + b.h);
+}
+const subFitsAt = (x, y) => !SUB_BOXES.some(([bx, by, bw, bh]) => caveBoxHit({ x: x + bx, y: y + by, w: bw, h: bh }));
+// Sonar ray through the cave: march, then home in on the wall. The wall's direction (for the sonar's smear) comes
+// from the rock field's slope.
+function caveRay(o, dx, dy) {
+  let prev = 0;
+  for (let t = 4; t <= MURK_RADIUS + 4; t += 4) {
+    if (!caveSolidAt(o.x + dx * t, o.y + dy * t)) { prev = t; continue; }
+    let lo = prev, hi = t;
+    for (let k = 0; k < 5; k++) { const m = (lo + hi) / 2; if (caveSolidAt(o.x + dx * m, o.y + dy * m)) hi = m; else lo = m; }
+    const px = o.x + dx * hi, py = o.y + dy * hi, h = CAVE_CELL;
+    const gx = caveField(px + h, py) - caveField(px - h, py), gy = caveField(px, py + h) - caveField(px, py - h), l = Math.hypot(gx, gy);
+    return l > 1e-6 ? { t: hi, tx: -gy / l, ty: gx / l } : { t: hi, tx: -dy, ty: dx };
+  }
+  return null;
+}
+// Where along the path the sub is (nearest path sample, searched near the last one) and which segment that is
+function nearestPathIndex(x, y, hint = 0) {
+  const pts = LV.pts; let best = hint, bd = Infinity;
+  const scan = (a, b) => { for (let i = Math.max(0, a); i < Math.min(pts.length, b); i++) { const d = (pts[i].x - x) ** 2 + (pts[i].y - y) ** 2; if (d < bd) { bd = d; best = i; } } };
+  scan(hint - 150, hint + 150);
+  if (bd > 300 * 300) scan(0, pts.length);   // lost track (teleport, respawn): full search
+  return best;
+}
+// ----- Run state: checkpoints reached, respawn point, win -----
+let run = { reached: 0, respawn: null, won: false, near: 0 };
+const segAt = i => LV ? LV.segs[LV.pts[i].seg] : null;
+function updateRun(dt) {
+  if (!LV || sub.dead) return;
+  run.near = nearestPathIndex(sub.x, sub.y, run.near);
+  for (let k = LV.checkpoints.length; k > run.reached; k--) { const c = LV.checkpoints[k - 1]; if (Math.hypot(sub.x - c.x, sub.y - c.y) < CHECKPOINT_RADIUS) { reachCheckpoint(k); break; } }
+  if (!run.won && Math.hypot(sub.x - LV.atlantis.x, sub.y - LV.atlantis.y) < ATLANTIS_RADIUS) {
+    run.won = true; log('ATLANTIS', 'good'); SFX.sold();
+  }
+}
+// A checkpoint: free gas refill (only gas) and the new respawn point
+function reachCheckpoint(k) {
+  const c = LV.checkpoints[k - 1];
+  run.reached = k; run.respawn = { x: c.x, y: c.y };
+  fuel = 1;
+  if (engine.state === 'off' && engine.report === 'fuel') engine.report = 'prevention';   // a dry engine can be restarted now
+  log(`CHECKPOINT ${k}: GAS REFILLED`, 'good'); SFX.sold(); showTip('checkpoint');
+}
+// Sunk: back to the last checkpoint (or the surface). Parts, wiring and stock stay as they were.
+function respawn() {
+  const p = run.respawn;
+  Object.assign(sub, { x: p.x, y: p.y, vx: 0, vy: 0, ang: 0, angV: 0, dead: false, hullImm: 1 });
+  sub.hp = Math.max(sub.hp, Math.ceil(MAX_HP * HULL_FREE_FRACTION));
+  water = 0; engWater = 0; air = 1; termShorted = false; failReason = null; slosh = { a: 0, v: 0, lastVx: 0 };
+  if (run.reached) fuel = 1;
+  mode = 'seated'; zoomT = 0; fix = null; grip = null; inv.open = false; if (carry) stowCarry();
+  dots = []; pings = []; echoes = []; cam.x = sub.x; cam.y = sub.y;
+  log(run.reached ? `BACK AT CHECKPOINT ${run.reached}` : 'BACK AT THE SURFACE', 'warn');
+}
+// Console hooks: forceSeed(n) new run on that seed; forceSegment(type) puts that segment right after the first
+// checkpoint and starts you there; skipToCheckpoint() jumps to the next checkpoint (or into Atlantis).
+function forceSeed(n) { runSeed = n | 0; buildLevel(runSeed); reset(); return runSeed; }
+function forceSegment(type) {
+  if (!SEG_TYPES.includes(type)) return `types: ${SEG_TYPES.join(', ')}`;
+  forcedSegment = type; buildLevel(runSeed); reset(); forcedSegment = null;
+  skipToCheckpoint(); return `${SEG_NAMES[type]} after checkpoint 1`;
+}
+function skipToCheckpoint() {
+  if (!LV) return 'test trench: no checkpoints';
+  const c = LV.checkpoints[run.reached] || LV.atlantis;
+  Object.assign(sub, { x: c.x, y: c.y, vx: 0, vy: 0 }); cam.x = c.x; cam.y = c.y; run.near = nearestPathIndex(c.x, c.y, 0);
+  updateRun(0); return run.won ? 'ATLANTIS' : `checkpoint ${run.reached}`;
+}
+
 // ===================== STATE =====================
 const cv = document.getElementById('c');
 let ctx = cv.getContext('2d');           // swapped to an offscreen canvas when snapshotting frozen screens
 const keys = {}, mouse = { x: 0, y: 0, down: false, rdown: false };
 let sub, cam, dots, pings, echoes, pingTimer, omniTimer, time, runTime;
-let relics, scraps, arm, coins, paid, quota, divesDone, quotasMet, phase, dockT, maxDepth;
+let relics, scraps, arm, coins, phase;
 let engine, gen, sys, air, fuel, water, engWater, slosh, termShorted, items, parts, modules, hatch, crank, grip, carry, inv, hold;
 let mode, standT, fig, hand, shake, shakeAmp, shakeBias, propAng, zoomT, throttle, frozenThrottle, darkT;
 let failReason, pumpSpark, snapshot, termButtons = [], invButtons = [];
@@ -383,7 +630,7 @@ function reset() {
   sub = { x: DOCK_X, y: DOCK_Y, vx: 0, vy: 0, ang: 0, angV: 0, hp: MAX_HP, hullImm: 0, dead: false, patches: 0 };   // patches = hull repairs so far
   cam = { x: DOCK_X, y: DOCK_Y };
   time = 0; runTime = 0;
-  coins = 0; paid = 0; quota = QUOTA_START; divesDone = 0; quotasMet = 0;
+  coins = 0;
   fuel = 1; air = 1; water = 0;
   // Water: cabin level (water, 0..1 of the cabin height) and engine room level (engWater, 0..1 of its height).
   // slosh = the surface's extra tilt from the sub's acceleration (a damped spring)
@@ -429,7 +676,7 @@ function reset() {
   failReason = null;
   dots = []; pings = []; echoes = []; pingTimer = 0; omniTimer = 0;
   logLines = [];
-  startDock(true);
+  startRun();
 }
 
 // ===================== HELPERS =====================
@@ -700,49 +947,33 @@ function log(t, sev = 'warn') {
   if (time > 0 && power()) tone(sev === 'bad' ? 300 : sev === 'good' ? 990 : 600, 0.07);
 }
 
-// ===================== DIVES + QUOTA =====================
-// Dock phase: held at the top, 60 s of free repairs, free module swaps, buy hull hits, pay quota.
-function startDock(first) {
-  phase = 'dock'; dockT = DOCK_TIME; maxDepth = 0; fix = null; fixSaved = {};
-  sub.x = DOCK_X; sub.y = DOCK_Y; sub.vx = sub.vy = 0;
-  if (!first && sub.hp < Math.ceil(MAX_HP * HULL_FREE_FRACTION)) { sub.hp = Math.ceil(MAX_HP * HULL_FREE_FRACTION); sub.patches++; }
+// ===================== START OF A RUN =====================
+// One way down: start at the surface, the shaft, the cave, Atlantis. No dock, no quota.
+function startRun() {
+  phase = 'dive'; fix = null; fixSaved = {};
+  const st = LV ? LV.start : { x: DOCK_X, y: DOCK_Y };
+  sub.x = st.x; sub.y = st.y; sub.vx = sub.vy = 0; cam.x = st.x; cam.y = st.y;
   water = 0; engWater = 0; termShorted = false; air = 1;
   if (fuel > 0 && !parts.engine.fail && !parts.engine.wire.broken) { engine.state = 'running'; engine.report = null; engine.stopIn = 0; }
   gen.on = true; gen.boot = 0; arm.hits = 0;
-  // Horn charges refilled: one loaded in the horn, the rest topped up in storage (HORN_CHARGES in all)
+  // Horn charges: one loaded in the horn, the rest topped up in storage (HORN_CHARGES in all)
   mod('HORN').loaded = 1;
   for (const c of items) if (c.type === 'CHARGE') { c.gas = 1; c.leak = 0; }
   if (canStoreType('CHARGE')) for (let n = items.filter(i => i.type === 'CHARGE').length; n < HORN_CHARGES - 1; n++) items.push({ type: 'CHARGE', where: 'storage', gas: 1 });
-  for (const n of WIRED) { const w = P(n).wire; w.wet = 0; w.off = false; }   // wires dry out on the surface (a soaked one stays dead until rewired)
   hornWaves = [];
+  if (LV) CREATURE_HOME = LV.creature;
   creature.x = CREATURE_HOME[0]; creature.y = CREATURE_HOME[1]; creature.vx = creature.vy = 0;
-  // Fresh loot every dive: the bait by the creature, a couple in the trench, most of it in the ruins
-  const pick = (list, n, value) => shuffle(list).slice(0, n).map(([x, y]) => ({ x, y, value, state: 'free' }));
-  relics = [...pick(RELIC_BAIT, 2, RELIC_VALUE), ...pick(RELIC_UPPER, UPPER_RELICS_PER_DIVE, RELIC_VALUE_UPPER),
-            ...pick(RELIC_RUINS, RUIN_RELICS_PER_DIVE, RELIC_VALUE_RUINS)];
-  scraps = shuffle(SCRAP_POOL).slice(0, SCRAP_PER_DIVE).map(([x, y]) => ({ x, y, state: 'free', type: SCRAP_MIX[Math.floor(Math.random() * SCRAP_MIX.length)] }));
-  dots = []; pings = []; echoes = [];
-  log(first ? 'DOCKED. FREE REPAIRS 60s' : `DIVE ${divesDone} DONE. FREE REPAIRS 60s`, 'good');
-}
-function launch() {
-  if (phase !== 'dock') return;
-  phase = 'dive'; sub.vy = 60;
-  log('DIVING', 'good');
-}
-function endDive() {
-  divesDone++;
-  if (divesDone % DIVES_PER_QUOTA === 0) {
-    const pay = Math.min(coins, quota - paid); coins -= pay; paid += pay;
-    if (paid < quota) return fail('QUOTA MISSED');
-    quotasMet++; log(`QUOTA ${quota} MET`, 'good');
-    quota = Math.round(quota * QUOTA_GROWTH / 50) * 50; paid = 0;
+  if (LV) {   // the run's loot, placed by the generator
+    relics = LV.relics.map(r => ({ ...r, state: 'free' }));
+    scraps = LV.scraps.map(r => ({ ...r, state: 'free' }));
+  } else {    // test trench: the old picks
+    const pick = (list, n, value) => shuffle(list).slice(0, n).map(([x, y]) => ({ x, y, value, state: 'free' }));
+    relics = [...pick(RELIC_BAIT, 2, RELIC_VALUE), ...pick(RELIC_UPPER, UPPER_RELICS_PER_DIVE, RELIC_VALUE_UPPER), ...pick(RELIC_RUINS, RUIN_RELICS_PER_DIVE, RELIC_VALUE_RUINS)];
+    scraps = shuffle(SCRAP_POOL).slice(0, SCRAP_PER_DIVE).map(([x, y]) => ({ x, y, state: 'free', type: SCRAP_MIX[Math.floor(Math.random() * SCRAP_MIX.length)] }));
   }
-  startDock(false);
-}
-function payQuota() {
-  const pay = Math.min(coins, quota - paid);
-  if (pay <= 0) return;
-  coins -= pay; paid += pay; log(`PAID ${pay} TOWARD QUOTA`, 'good');
+  run = { reached: 0, respawn: { x: st.x, y: st.y }, won: false, near: 0 };
+  dots = []; pings = []; echoes = [];
+  log(LV ? `DIVE START (SEED ${runSeed})` : 'TEST TRENCH', 'good');
 }
 function buyGas() {
   if (phase !== 'dock' || coins < GAS_COST) return;
@@ -756,7 +987,7 @@ function buyHull() {
 function fail(reason) {
   if (sub.dead) return;
   sub.dead = true; failReason = reason;
-  if (reason !== 'QUOTA MISSED') SFX.implode();
+  SFX.implode();
 }
 
 // ===================== POWER + AIR =====================
@@ -1071,14 +1302,11 @@ addEventListener('keydown', e => {
       else if (fix) fixPress(); else if (t && t.panel) openPanel(t); else if (t && t.can && t.game && batteryAlive()) startFix(t); else tapE();
     }
     if (e.code === 'Escape') { inv.open = false; grip = null; stopFix(null); book.open = false; }
-    if (e.code === 'Space' && mode === 'seated') launch();
-    if (e.code === 'KeyH') buyHull();
-    if (e.code === 'KeyB') buyGas();
-    if (e.code === 'KeyP') payQuota();
     if (mode === 'seated' && ['Digit1', 'Digit2', 'Digit3'].includes(e.code)) toggleSystem(['sonar', 'pump', 'lights'][+e.code[5] - 1]);
     if (e.code === 'KeyQ') fireHorn();
     if (e.code === 'KeyG') toggleGfx();
-    if (e.code === 'KeyR' && sub.dead) reset();
+    if (e.code === 'KeyR' && run.won) { runSeed = Math.random() * 1e9 | 0; buildLevel(runSeed); reset(); }
+    else if (e.code === 'KeyR' && sub.dead) respawn();
   }
   keys[e.code] = true;
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
@@ -1498,7 +1726,7 @@ function boxHitsSolid(b, s) {
   }
   return false;
 }
-const subHitsSolid = () => subBoxes().some(b => SOLIDS.some(s => boxHitsSolid(b, s)));
+const subHitsSolid = () => LV ? subBoxes().some(caveBoxHit) : subBoxes().some(b => SOLIDS.some(s => boxHitsSolid(b, s)));
 // If the hull ever ends up inside rock, pop it out to the nearest free spot (searching outward in rings)
 function unstick() {
   if (!subHitsSolid()) return;
@@ -1567,8 +1795,6 @@ function updateSub(dt) {
     moveAxis('x', sub.vx * dt);
     moveAxis('y', sub.vy * dt);
     touchCreature();
-    maxDepth = Math.max(maxDepth, sub.y);
-    if (sub.y < DIVE_RETURN_Y && maxDepth > DIVE_MIN_DEPTH && !sub.dead) endDive();
   }
   const target = sub.vx * TILT_PER_SPEED;
   sub.angV += (target - sub.ang) * ROT_STIFFNESS / mass() * dt;
@@ -1657,8 +1883,8 @@ function updateHorn(dt) {
   if (solidAt(creature.x, creature.y)) { creature.x = px; creature.y = py; creature.vx = creature.vy = 0; } // shoved into rock: stops
 }
 // Draw shockwaves as expanding orange arcs (S = world -> drawing coords, k = scale)
-function drawHornWaves(S, k) {
-  ctx.strokeStyle = '#fa4'; ctx.lineWidth = 3 * Math.max(k, 0.5);
+function drawHornWaves(S, k, mono) {
+  ctx.strokeStyle = mono ? '#ddd' : '#fa4'; ctx.lineWidth = 3 * Math.max(k, 0.5);
   for (const w of hornWaves) {
     const r = (time - w.t) * HORN_SPEED, [x, y] = S(w.x, w.y);
     ctx.globalAlpha = 1 - r / HORN_RANGE;
@@ -1723,7 +1949,8 @@ function castRay(o, ang) {
   const dx = Math.cos(ang), dy = Math.sin(ang);
   // Level: nearest polygon edge (the edge's own direction is the surface tangent)
   let best = Infinity, kind = 'rock', seg = null;
-  for (const s of SOLIDS) {
+  if (LV) { const h = caveRay(o, dx, dy); if (h) { best = h.t; seg = h; } }
+  else for (const s of SOLIDS) {
     if (o.x < s.x0 - MURK_RADIUS || o.x > s.x1 + MURK_RADIUS || o.y < s.y0 - MURK_RADIUS || o.y > s.y1 + MURK_RADIUS) continue;
     for (const g of s.segs) { const t = raySeg(o.x, o.y, dx, dy, g); if (t < best) { best = t; seg = g; kind = s.kind; } }
   }
@@ -1788,6 +2015,7 @@ function fireOmni() {
   }
   pings.push({ x: o.x, y: o.y, t: time, rays, noise, omni: true });
   SFX.omni();
+  if (LV && segAt(run.near).type === 'crystal') failPart('sonar', 'S-31');   // the crystals scream it back
 }
 // Bad hardware smears each return ALONG the surface it hit (big error) and barely into it (tiny error),
 // so walls read as a thin, wobbly outline instead of a filled band.
@@ -1802,7 +2030,7 @@ function spawnEcho(p, r) {
   const tx = r.tx ?? -r.dy, ty = r.ty ?? r.dx;
   const hx = p.x + r.dx * (r.dist + depth) + tx * along;
   const hy = p.y + r.dy * (r.dist + depth) + ty * along;
-  echoes.push({ x: hx, y: hy, hx, hy, kind: r.kind, omni: om, noise: r.noise, bright: (1 - SONAR_DIST_FADE * f) * (om ? OMNI_BRIGHT : 1) });
+  echoes.push({ x: hx, y: hy, hx, hy, tx, ty, kind: r.kind, omni: om, noise: r.noise, bright: (1 - SONAR_DIST_FADE * f) * (om ? OMNI_BRIGHT : 1) });
 }
 function updateSonar(dt) {
   pingTimer -= dt;
@@ -1824,7 +2052,7 @@ function updateSonar(dt) {
       if (e.kind === 'relic') showTip('loot'); else if (e.kind === 'creature') showTip('creature');
       if (!e.noise && e.kind === 'creature' && amb.beast <= 0) { SFX.retBeast(); amb.beast = 1.5; }
       else if (!e.noise && amb.ret <= 0) { SFX.ret(e.bright); amb.ret = 0.09 + Math.random() * 0.08; }
-      dots.push({ x: e.hx, y: e.hy, t: time, kind: e.kind, noise: e.noise, bright: e.bright, size: (0.7 + Math.random() * 0.6) * (e.omni ? OMNI_BLOB : 1),
+      dots.push({ x: e.hx, y: e.hy, tx: e.tx, ty: e.ty, r: Math.random(), t: time, kind: e.kind, noise: e.noise, bright: e.bright, size: (0.7 + Math.random() * 0.6) * (e.omni ? OMNI_BLOB : 1),
                   fade: e.kind === 'creature' ? CREATURE_DOT_FADE : DOT_FADE_TIME });
     } else { e.x += dx / d * step; e.y += dy / d * step; }
   }
@@ -1841,7 +2069,6 @@ function update(dt) {
   sub.hullImm -= dt;
   for (const k in parts) parts[k].imm -= dt;
   for (const m of modules) m.imm -= dt;
-  if (phase === 'dock' && (dockT -= dt) <= 0) launch();
   updatePower(dt);
   updateWater(dt);
   updateParts(dt);
@@ -1854,6 +2081,7 @@ function update(dt) {
   updateItems(dt);
   updateCharges(dt);
   updateSnow(dt);
+  updateRun(dt);
   const zt = mode === 'seated' ? 0 : 1;
   zoomT += Math.sign(zt - zoomT) * Math.min(Math.abs(zt - zoomT), dt / ZOOM_TIME);
   const zs = Math.min(ZOOM_STANDING, cv.width * 0.85 / 250, cv.height * 0.75 / 115);
@@ -2398,7 +2626,7 @@ function drawCap(x, y, f) {
   ctx.fillRect(f >= 0 ? x - 1 : x - 7.5, y - 2.2, f === 0 ? 2 : 8.5, 1.6);
 }
 // Robot arm: grey segments, orange pincer
-function drawArm(S, k, lw) {
+function drawArm(S, k, lw, mono) {
   const b = armBase();
   const [bx, by] = S(b.x, b.y), [tx, ty] = S(arm.tipX, arm.tipY);
   const dx = tx - bx, dy = ty - by, d = Math.hypot(dx, dy) || 1, ux = dx / d, uy = dy / d;
@@ -2408,7 +2636,7 @@ function drawArm(S, k, lw) {
   ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(ex, ey); ctx.lineTo(tx, ty); ctx.stroke();
   ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(ex, ey, 2 * k, 0, Math.PI * 2); ctx.fill();
   const a = Math.atan2(ty - ey, tx - ex), open = arm.held ? 0.15 : 0.55, len = 7 * k;
-  ctx.strokeStyle = arm.broken ? '#777' : arm.held ? RELIC_COLOR : '#f80'; ctx.lineWidth = lw * 1.3;
+  ctx.strokeStyle = mono ? (arm.held ? '#eee' : '#aaa') : arm.broken ? '#777' : arm.held ? RELIC_COLOR : '#f80'; ctx.lineWidth = lw * 1.3;
   ctx.beginPath();
   for (const s of [-1, 1]) {
     const mx = tx + Math.cos(a + s * open) * len, my = ty + Math.sin(a + s * open) * len;
@@ -2426,14 +2654,14 @@ function drawRail(S, lw) {
   ctx.beginPath(); RAIL.forEach((p, i) => { const w = subPoint(p), [x, y] = S(w.x, w.y); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.stroke();
   ctx.lineCap = 'butt';
 }
-function drawBalloons(S, k) {
+function drawBalloons(S, k, mono) {
   for (const r of relics) {
     if (r.state !== 'rising') continue;
     const [x, y] = S(r.x, r.y), s = RELIC_SIZE * k;
-    ctx.strokeStyle = RELIC_COLOR; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = mono ? '#ccc' : RELIC_COLOR; ctx.lineWidth = 1.5;
     ctx.strokeRect(x - s / 2, y - s / 2, s, s);
     ctx.beginPath(); ctx.moveTo(x, y - s / 2); ctx.lineTo(x, y - 40 * k); ctx.stroke();
-    ctx.fillStyle = '#e44'; ctx.beginPath(); ctx.arc(x, y - 52 * k, 12 * k, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = mono ? '#999' : '#e44'; ctx.beginPath(); ctx.arc(x, y - 52 * k, 12 * k, 0, Math.PI * 2); ctx.fill();
   }
 }
 
@@ -2628,13 +2856,9 @@ function staticNoise(x, y, w, h) {
 }
 // ----- Sonar look (Barotrauma-style): soft additive glow blobs that cool from cyan-green to blue as they age -----
 // Color ramps per return type: [fresh, middle, old]
-const DOT_RAMP = {
-  rock:     [[170, 255, 210], [60, 200, 255], [30, 70, 220]],
-  creature: [[255, 170, 110], [240, 70, 40], [140, 20, 40]],
-  relic:    [[255, 245, 160], [255, 200, 50], [170, 100, 10]],
-  scrap:    [[240, 245, 255], [160, 180, 230], [80, 90, 150]],
-  ruin:     [[235, 210, 150], [150, 200, 190], [60, 100, 140]],   // architecture: pale bone-white, so it reads apart from rock
-};
+// Monochrome: everything is the same grey; rock, loot and creatures are told apart by SHAPE, not colour
+const GREY_RAMP = [[235, 235, 235], [165, 165, 165], [85, 85, 85]];
+const DOT_RAMP = { rock: GREY_RAMP, creature: GREY_RAMP, relic: GREY_RAMP, scrap: GREY_RAMP, ruin: GREY_RAMP };
 const RAMP_STEPS = 10;
 const blobCache = {};
 // Pre-rendered soft round glow for a kind, age step and pixel size (cached at exact size so drawing it is a plain copy)
@@ -2658,7 +2882,7 @@ function screenTexture(R) {
   const g = c.getContext('2d'), img = g.createImageData(n, n);
   for (let i = 0; i < img.data.length; i += 4) {
     const y = Math.floor(i / 4 / n), v = Math.random() * 40 + (y % 3 === 0 ? 18 : 0);
-    img.data[i] = v * 0.6; img.data[i + 1] = v; img.data[i + 2] = v * 0.9; img.data[i + 3] = 40;
+    img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 40;
   }
   g.putImageData(img, 0, 0);
   screenTex = { R, c };
@@ -2675,18 +2899,18 @@ function sonarLayers(R) {
   g.strokeStyle = '#2c3330'; g.lineWidth = 3; g.stroke();
   g.save(); g.beginPath(); g.arc(c0, c0, R, 0, Math.PI * 2); g.clip();
   const bg = g.createRadialGradient(c0, c0, 0, c0, c0, R);
-  bg.addColorStop(0, '#16221d'); bg.addColorStop(0.7, '#0c1512'); bg.addColorStop(1, '#060a09');
+  bg.addColorStop(0, '#1a1a1a'); bg.addColorStop(0.7, '#101010'); bg.addColorStop(1, '#070707');
   g.fillStyle = bg; g.fillRect(c0 - R, c0 - R, 2 * R, 2 * R);
   g.drawImage(screenTexture(R), c0 - R, c0 - R);
-  g.strokeStyle = 'rgba(150,200,180,0.07)'; g.lineWidth = 1; g.beginPath();
+  g.strokeStyle = 'rgba(180,180,180,0.07)'; g.lineWidth = 1; g.beginPath();
   for (const f of [1 / 3, 2 / 3]) { g.moveTo(c0 + R * f, c0); g.arc(c0, c0, R * f, 0, Math.PI * 2); }
   g.stroke(); g.restore();
   const over = makeCanvas(n, n), h = over.getContext('2d');
   h.save(); h.beginPath(); h.arc(c0, c0, R, 0, Math.PI * 2); h.clip();
   const vg = h.createRadialGradient(c0, c0, R * 0.75, c0, c0, R);
   vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.55)'); h.fillStyle = vg; h.fillRect(0, 0, n, n); h.restore();
-  h.strokeStyle = 'rgba(215,200,165,0.8)'; h.lineWidth = 2; h.beginPath(); h.arc(c0, c0, R, 0, Math.PI * 2); h.stroke();
-  h.strokeStyle = 'rgba(215,200,165,0.45)'; h.lineWidth = 1; h.beginPath();
+  h.strokeStyle = 'rgba(200,200,200,0.8)'; h.lineWidth = 2; h.beginPath(); h.arc(c0, c0, R, 0, Math.PI * 2); h.stroke();
+  h.strokeStyle = 'rgba(200,200,200,0.45)'; h.lineWidth = 1; h.beginPath();
   for (let i = 0; i < 72; i++) {
     const a = i * Math.PI / 36, l = i % 6 ? 6 : 12;
     h.moveTo(c0 + Math.cos(a) * (R - 2), c0 + Math.sin(a) * (R - 2)); h.lineTo(c0 + Math.cos(a) * (R - 2 - l), c0 + Math.sin(a) * (R - 2 - l));
@@ -2698,15 +2922,32 @@ function sonarLayers(R) {
 // expensive full-screen-sized operations on machines that render the canvas on the CPU): dots too close
 // to the rim are simply skipped so nothing spills over it.
 function drawSonarGlow(S, cx, cy, R, k) {
-  const base = SONAR_BLOB * k * 2;
+  const base = SONAR_BLOB * k * 2, lines = Array.from({ length: 10 }, () => []), specks = Array.from({ length: 10 }, () => []);
   ctx.globalCompositeOperation = 'lighter';
   for (const p of dots) {
     const age = time - p.t, f = age / p.fade, [x, y] = S(p.x, p.y);
-    const sz = Math.max(4, Math.round(base * p.size * (age < 0.25 ? 1.5 - age * 2 : 1) / 2) * 2);   // fresh returns bloom
-    if (Math.hypot(x - cx, y - cy) > R - sz / 2) continue;
-    const step = Math.min(RAMP_STEPS - 1, Math.floor(f * RAMP_STEPS));
-    ctx.globalAlpha = p.bright * Math.pow(1 - f, 0.8) * SONAR_BLOB_ALPHA;
-    ctx.drawImage(blobSprite(p.kind, step, sz), Math.round(x - sz / 2), Math.round(y - sz / 2));
+    const a = p.bright * Math.pow(1 - f, 0.8), b = Math.min(9, Math.floor(a * 10));
+    if (p.kind === 'rock' || p.kind === 'ruin') {   // rock: a short sharp line along the wall it hit
+      const l = base * 0.55 * p.size, tx = p.tx ?? 1, ty = p.ty ?? 0;
+      if (Math.hypot(x - cx, y - cy) > R - l) continue;
+      lines[b].push(x - tx * l, y - ty * l, x + tx * l, y + ty * l);
+    } else if (p.kind === 'relic' || p.kind === 'scrap') {   // loot: a small, tight cluster of dots
+      if (Math.hypot(x - cx, y - cy) > R - 6) continue;
+      for (let i = 0; i < 4; i++) specks[b].push(x + Math.sin(p.r * 50 + i * 2.1) * 3, y + Math.cos(p.r * 70 + i * 2.7) * 3);
+    } else {   // a creature: a larger, lumpy blob
+      const sz = Math.max(6, Math.round(base * 1.4 * p.size / 2) * 2);
+      if (Math.hypot(x - cx, y - cy) > R - sz) continue;
+      const step = Math.min(RAMP_STEPS - 1, Math.floor(f * RAMP_STEPS));
+      ctx.globalAlpha = a * SONAR_BLOB_ALPHA;
+      for (let i = 0; i < 3; i++) ctx.drawImage(blobSprite('creature', step, sz), Math.round(x - sz / 2 + Math.sin(p.r * 30 + i * 2.1) * sz * 0.3), Math.round(y - sz / 2 + Math.cos(p.r * 40 + i * 2.1) * sz * 0.3));
+    }
+  }
+  ctx.strokeStyle = '#e6e6e6'; ctx.lineWidth = 1.3; ctx.fillStyle = '#e6e6e6';
+  for (let b = 0; b < 10; b++) {
+    if (!lines[b].length && !specks[b].length) continue;
+    ctx.globalAlpha = (b + 0.5) / 10;
+    if (lines[b].length) { const L = lines[b]; ctx.beginPath(); for (let i = 0; i < L.length; i += 4) { ctx.moveTo(L[i], L[i + 1]); ctx.lineTo(L[i + 2], L[i + 3]); } ctx.stroke(); }
+    const D = specks[b]; for (let i = 0; i < D.length; i += 2) ctx.fillRect(D[i] - 0.8, D[i + 1] - 0.8, 1.6, 1.6);
   }
   ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
 }
@@ -2719,14 +2960,14 @@ function drawSonarScreen(L) {
   ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
   ctx.textAlign = 'center'; ctx.font = 'bold 16px monospace';
   const s = mod('SONAR');
-  if (!power()) { ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(cx - R, cy - R, 2 * R, 2 * R); ctx.fillStyle = gen.boot > 0 ? '#5a5' : '#411'; ctx.fillText(gen.boot > 0 ? 'BOOTING...' : 'NO POWER', cx, cy); }
+  if (!power()) { ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(cx - R, cy - R, 2 * R, 2 * R); ctx.fillStyle = gen.boot > 0 ? '#777' : '#333'; ctx.fillText(gen.boot > 0 ? 'BOOTING...' : 'NO POWER', cx, cy); }
   else {
     // Where the sonar can aim from its slot, and where it's aimed
     if (installed('SONAR')) {
       const { o, faceA, aim } = sonarAim(), [ox, oy] = S(o.x, o.y);
-      ctx.fillStyle = 'rgba(120,220,255,0.035)';
+      ctx.fillStyle = 'rgba(220,220,220,0.03)';
       ctx.beginPath(); ctx.moveTo(ox, oy); ctx.arc(ox, oy, R * 2, faceA - SONAR_PORT_ARC - PING_SPREAD / 2, faceA + SONAR_PORT_ARC + PING_SPREAD / 2); ctx.fill();
-      ctx.strokeStyle = 'rgba(220,205,170,0.35)'; ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox + Math.cos(aim) * R * 2, oy + Math.sin(aim) * R * 2); ctx.stroke();
+      ctx.strokeStyle = 'rgba(210,210,210,0.35)'; ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox + Math.cos(aim) * R * 2, oy + Math.sin(aim) * R * 2); ctx.stroke();
     }
     // Returns: additive glow blobs. Overlaps get brighter, so repeatedly pinged walls burn in.
     // Drawn into an unclipped buffer first (per-draw clipping is slow), then copied onto the round screen once.
@@ -2749,16 +2990,15 @@ function drawSonarScreen(L) {
     ctx.globalAlpha = 0.35; ctx.fillStyle = SONAR_COLOR;
     for (const ec of echoes) { const [x, y] = S(ec.x, ec.y); ctx.fillRect(x - 1, y - 1, 2, 2); }
     // Faint static
-    if (gfxHigh) for (let i = 0; i < 18; i++) { ctx.globalAlpha = Math.random() * 0.25; ctx.fillStyle = '#4af'; ctx.fillRect(cx - R + Math.random() * 2 * R, cy - R + Math.random() * 2 * R, 2, 2); }
+    if (gfxHigh) for (let i = 0; i < 18; i++) { ctx.globalAlpha = Math.random() * 0.25; ctx.fillStyle = '#aaa'; ctx.fillRect(cx - R + Math.random() * 2 * R, cy - R + Math.random() * 2 * R, 2, 2); }
     ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
     // Own sub: thin pale outline, like the reference
     ctx.strokeStyle = 'rgba(225,230,220,0.75)'; ctx.lineWidth = 1.2;
     ctx.beginPath(); HULL_OUTLINE.forEach((p, i) => { const w = subPoint(p), [x, y] = S(w.x, w.y); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.closePath(); ctx.stroke();
-    drawArm(S, k, 1.5); drawBalloons(S, k); drawHornWaves(S, k);
-    ctx.fillStyle = '#e44';
+    drawArm(S, k, 1.5, true); drawBalloons(S, k, true); drawHornWaves(S, k, true);
+    ctx.fillStyle = '#bbb';
     if (!sys.sonar) ctx.fillText('SONAR SWITCHED OFF  [1]', cx, cy - R * 0.55);
     else if (s.slot < 0 || s.carried) { ctx.font = '12px monospace'; ctx.fillText('NO DIRECTIONAL MODULE - RMB STILL PINGS ALL AROUND', cx, cy - R * 0.55); ctx.font = 'bold 16px monospace'; }
-    if (phase === 'dock') { ctx.fillStyle = '#9cf'; ctx.fillText('DOCKED', cx, cy + R * 0.6); }
   }
   ctx.restore();
   // Edge vignette, beige rim, ticks (cached)
@@ -3181,14 +3421,14 @@ function drawItemIcon(type, x, y) {
 }
 
 // ===================== TITLE, CONTROLS, FIRST-TIME TIPS =====================
-let title = location.hash !== '#play', showDebug = false, showF3 = false;
+let title = !/play/.test(location.hash), showDebug = false, showF3 = false;
 const book = { open: false, scroll: 0, max: 0 };
 function startGame() { title = false; initAudio(); }
 const CONTROLS = [
   ['SEATED (AT THE CHAIR)', [['W A S D', 'steer'], ['LMB', 'directional sonar ping'], ['RMB', 'all-around sonar ping'], ['E (hold)', 'robot arm grabs where you aim'],
-                             ['Q', 'horn (fires its loaded charge)'], ['1  2  3', 'sonar / pump / lights'], ['SPACE', 'dive (at the dock)'], ['F', 'stand up']]],
+                             ['Q', 'horn (fires its loaded charge)'], ['1  2  3', 'sonar / pump / lights'], ['F', 'stand up']]],
   ['STANDING', [['A / D', 'walk'], ['MOUSE', 'your hand'], ['LMB', 'grab / click'], ['E', 'inspect a part / use'], ['F', 'sit (by the chair)'], ['ESC', 'close / stop']]],
-  ['ANYTIME', [['J', 'handbook (codes)'], ['H', 'buy hull (dock)'], ['P', 'pay quota (dock)'], ['TAB', 'show controls'], ['ENTER', 'dismiss a tip'], ['M', 'sound on / off'], ['G', 'graphics high / low'], ['` / F3', 'debug readouts']]],
+  ['ANYTIME', [['J', 'handbook (codes)'], ['R', 'sunk: back to checkpoint'], ['TAB', 'show controls'], ['ENTER', 'dismiss a tip'], ['M', 'sound on / off'], ['G', 'graphics high / low'], ['` / F3', 'debug readouts']]],
 ];
 function drawControls(y) {
   const W = cv.width, cw = Math.min(300, (W - 64) / 3), x0 = (W - cw * 3) / 2;
@@ -3207,7 +3447,7 @@ function drawTitle() {
   ctx.textAlign = 'center'; ctx.font = 'bold 54px monospace'; ctx.fillStyle = '#9fe6e0';
   ctx.shadowColor = '#3cc'; ctx.shadowBlur = 24; ctx.fillText('ATLANTIS SUB', W / 2, y + 50); ctx.shadowBlur = 0;
   ctx.font = '14px monospace'; ctx.fillStyle = '#bcc';
-  ctx.fillText("You're the whole crew. Loot Atlantis, keep this tin can alive, make quota.", W / 2, y + 86);
+  ctx.fillText("You're the whole crew. Dive to Atlantis and keep this tin can alive on the way.", W / 2, y + 86);
   ctx.fillStyle = '#788'; ctx.fillText('Sonar is your only eyes. Everything breaks. Nobody is coming.', W / 2, y + 108);
   drawControls(y + 160);
   ctx.textAlign = 'center'; ctx.font = 'bold 16px monospace'; ctx.fillStyle = `rgba(255,176,64,${0.6 + 0.4 * Math.sin(performance.now() / 300)})`;
@@ -3216,8 +3456,8 @@ function drawTitle() {
 }
 // Tips: each one shows once (this browser remembers), the first time its situation comes up
 const TIPS = {
-  dock: 'DOCKED. You get 60 s of free repairs here. SPACE dives. Go deeper than 50 m, then come back up to the top to finish a dive. The quota is due every 3 dives.',
-  dock2: 'BACK AT THE DOCK. The hull gets patched for free, but only up to about half. H buys more hull, P pays toward the quota. Broken stuff: stand up and hold E on it (free here).',
+  start: 'THE DIVE. Go down the shaft, then follow the cave to the right until you reach Atlantis. There is no way back up.',
+  checkpoint: 'CHECKPOINT. Your gas is refilled here for free. If you sink, this is where you come back (R).',
   dive: 'SONAR IS YOUR ONLY EYES. RMB: all-around ping (rough). LMB: directional ping from the sonar module (sharp, but only where its slot faces). WASD steers, F stands you up.',
   stand: 'STANDING. A/D walk, the mouse is your hand. LMB grabs and clicks, E uses. You only see the way you face. F sits you back down at the chair.',
   loot: 'YELLOW BLIP = LOOT. Hold E and point at it on the sonar: the arm grabs it. Relics float up on a balloon and pay out. Scrap gets dropped inside.',
@@ -3243,8 +3483,8 @@ function showTip(id) {
 function dismissTip() { if (tipNow) tipNow.t = Math.min(tipNow.t, 0.3); }
 function checkTips() {
   if (sub.dead) return;
-  if (phase === 'dock') showTip(divesDone ? 'dock2' : 'dock');
   if (phase !== 'dive') return;
+  showTip('start');
   showTip('dive');
   if (mode === 'standing') showTip('stand');
   if (activeCodes().length) showTip('damaged');
@@ -3261,7 +3501,6 @@ function checkTips() {
 }
 function updateTips(dt) {
   if ((tipClock -= dt) <= 0) { checkTips(); tipClock = 0.25; }
-  if (tipNow && tipNow.id.startsWith('dock') && phase === 'dive') tipNow.t = Math.min(tipNow.t, 0.3);   // left the dock
   if (tipNow && (tipNow.t -= dt) <= 0) tipNow = null;
   tipQueue = tipQueue.filter(q => time - q.at < 15 && !tipSeen[q.id]);   // stale ones (the moment passed) wait for next time
   if (!tipNow && tipQueue.length) {
@@ -3337,9 +3576,13 @@ function drawPartsDebug() {
            (WIRED.includes(n) ? `  wire ${w.wet.toFixed(2)}${w.broken ? ' SOAKED' : w.off ? ' off   ' : '       '} wire breaks ${w.breakCount}` : '  (no wire)');
   });
   rows.push(`BATTERY ${batteryAlive() ? 'ok' : 'DEAD'}   scars: ${PART_LIST.map(n => n[0].toUpperCase() + P(n).scars.length).join(' ')}`);
+  if (LV) {
+    const pi = run.near, sg = segAt(pi), next = LV.checkpoints[run.reached], toS = next ? next.s : LV.length;
+    rows.unshift(`SEED ${runSeed}   SEGMENT ${LV.pts[pi].seg}/${LV.segs.length - 1} ${SEG_NAMES[sg.type]}   ${next ? 'NEXT CHECKPOINT ' + (run.reached + 1) : 'ATLANTIS'} ${Math.max(0, (toS - LV.pts[pi].s) / 10).toFixed(0)} m along the path   reached ${run.reached}/${LV.checkpoints.length}${LV.fixes ? '   path fixes ' + LV.fixes : ''}`);
+  } else rows.unshift('TEST TRENCH (#trench)');
   const x = 16, y = 200;
   ctx.save(); ctx.font = '11px monospace'; ctx.textAlign = 'left';
-  rect([x - 6, y - 14, 560, rows.length * 15 + 10], 'rgba(0,0,0,0.75)', '#355');
+  rect([x - 6, y - 14, Math.max(560, ...rows.map(r => ctx.measureText(r).width + 12)), rows.length * 15 + 10], 'rgba(0,0,0,0.75)', '#355');
   rows.forEach((r, i) => { ctx.fillStyle = '#9fd'; ctx.fillText(r, x, y + i * 15); });
   // The open close-up: the exact state object it's drawing from
   if (fix && fix.panel) {
@@ -3355,8 +3598,7 @@ function drawPartsDebug() {
 const DEATH_HINTS = {
   'SUFFOCATED': 'the air generator needs power and a slot; the crank and venting a horn charge buy you time',
   'FLOODED': 'run the pump early, and keep the bay door shut after a malfunction until the pump is going',
-  'HULL IMPLODED': 'slow down near walls, and buy hull at the dock (H)',
-  'QUOTA MISSED': 'pay the quota at the dock (P); the ruins at the bottom pay the most',
+  'HULL IMPLODED': 'slow down near walls',
 };
 
 // ===================== RENDER =====================
@@ -3423,8 +3665,6 @@ function drawOverlays(W, H) {
   ctx.font = '13px monospace'; ctx.textAlign = 'left';
   ctx.fillStyle = RELIC_COLOR; ctx.fillText(`COINS ${coins}`, 16, hy);
   ctx.fillStyle = '#ddd';
-  const left = DIVES_PER_QUOTA - (divesDone % DIVES_PER_QUOTA);
-  ctx.fillText(`QUOTA ${paid}/${quota}  due in ${left} dive${left > 1 ? 's' : ''}`, 16, hy + 18);
   if (showF3) {
     ctx.fillText(`METAL ${storedOf('METAL')}  COPPER ${storedOf('COPPER')}  PIPE ${storedOf('PIPE')}  FILTER ${storedOf('FILTER')}`, 16, 146);
     const l2 = `TRANSD ${storedOf('TRANSDUCER')}  GAS ${storedOf('GAS')}  CHARGES ${charges()}  `;
@@ -3436,10 +3676,7 @@ function drawOverlays(W, H) {
   }
 
   ctx.textAlign = 'center'; ctx.font = 'bold 14px monospace';
-  if (phase === 'dock') {
-    ctx.fillStyle = '#9cf';
-    ctx.fillText(`DOCKED - FREE REPAIRS ${Math.ceil(dockT)}s - SPACE (seated) to dive - H: hull +${HIT_DAMAGE} (${HULL_HIT_COST}c) - B: gas can (${GAS_COST}c) - P: pay quota`, W / 2, 20);
-  } else { ctx.fillStyle = '#7ab'; ctx.fillText(`DIVE ${divesDone + 1}   DEPTH ${(sub.y / 10).toFixed(0)} m`, W / 2, 20); }
+  ctx.fillStyle = '#7ab'; ctx.fillText(`DEPTH ${(sub.y / 10).toFixed(0)} m`, W / 2, 20);
   ctx.fillStyle = mode === 'seated' ? '#9cf' : '#fc6';
   ctx.fillText(mode === 'seated' ? 'SEATED' : 'STANDING', W / 2, 40);
   if (mode === 'standing') {
@@ -3450,19 +3687,25 @@ function drawOverlays(W, H) {
   }
   ctx.font = '12px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = '#7ab';
   const dbg = [`SPD ${Math.hypot(sub.vx, sub.vy).toFixed(0)}`, `CREATURE ${(Math.hypot(sub.x - creature.x, sub.y - creature.y) / 10).toFixed(0)} m`,
-    `MODE ${mode}  FIG ${fig.x.toFixed(0)} face ${fig.face}`, `ENGINE ${engine.state}${engine.report ? ' ' + engine.report : ''}`, `RUN ${runTime.toFixed(0)}s  QUOTAS ${quotasMet}`, `GFX ${gfxHigh ? 'HIGH' : 'LOW'} (G)  ${(1000 / frameAvg).toFixed(0)} fps`];
+    `MODE ${mode}  FIG ${fig.x.toFixed(0)} face ${fig.face}`, `ENGINE ${engine.state}${engine.report ? ' ' + engine.report : ''}`, `RUN ${runTime.toFixed(0)}s  CHECKPOINT ${run.reached}`, `GFX ${gfxHigh ? 'HIGH' : 'LOW'} (G)  ${(1000 / frameAvg).toFixed(0)} fps`];
   if (showDebug) dbg.forEach((t, i) => ctx.fillText(t, W - 12, 18 + i * 16));
   else { ctx.fillStyle = '#566'; ctx.fillText(`TAB: CONTROLS${muted ? '   SOUND OFF' : ''}`, W - 12, 18); }
   drawTip();
   drawPartsDebug();
   drawHandbook();
 
+  if (run.won && !sub.dead) {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, H / 2 - 60, W, 110);
+    ctx.textAlign = 'center'; ctx.fillStyle = '#e8d8b0'; ctx.font = 'bold 36px monospace'; ctx.fillText('ATLANTIS', W / 2, H / 2 - 15);
+    ctx.font = '15px monospace'; ctx.fillStyle = '#fff';
+    ctx.fillText(`reached in ${Math.floor(runTime / 60)}:${String(Math.floor(runTime % 60)).padStart(2, '0')}  -  seed ${runSeed}  -  press R for a new run`, W / 2, H / 2 + 20);
+  }
   if (sub.dead) {
     ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, H / 2 - 60, W, 110);
     ctx.textAlign = 'center'; ctx.fillStyle = '#f44'; ctx.font = 'bold 36px monospace';
     ctx.fillText(`SUNK: ${failReason}`, W / 2, H / 2 - 15);
     ctx.font = '15px monospace'; ctx.fillStyle = '#fff';
-    ctx.fillText(`lasted ${Math.floor(runTime / 60)}:${String(Math.floor(runTime % 60)).padStart(2, '0')}  -  quotas met: ${quotasMet}  -  press R to start over`, W / 2, H / 2 + 20);
+    ctx.fillText(`lasted ${Math.floor(runTime / 60)}:${String(Math.floor(runTime % 60)).padStart(2, '0')}  -  press R to go back to ${run.reached ? 'checkpoint ' + run.reached : 'the surface'}`, W / 2, H / 2 + 20);
     if (DEATH_HINTS[failReason]) { ctx.fillStyle = '#9aa'; ctx.font = '12px monospace'; ctx.fillText(`next time: ${DEATH_HINTS[failReason]}`, W / 2, H / 2 + 42); }
   }
 }
@@ -3479,7 +3722,7 @@ function frame(now) {
   draw();
   requestAnimationFrame(frame);
 }
-resize(); buildTextures(); reset(); requestAnimationFrame(frame);
+resize(); buildTextures(); buildLevel(runSeed); reset(); requestAnimationFrame(frame);
 </script>
 </body>
 </html>
