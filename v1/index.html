@@ -1,0 +1,2943 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Atlantis Sub</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #04101f; }
+  canvas { display: block; cursor: crosshair; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// =====================================================================
+//  ATLANTIS SUB - demo skeleton. See DESIGN.md for the full idea.
+//  Visuals are deliberately rough; this file is about how it plays.
+// =====================================================================
+
+// ===================== TUNING =====================
+// Movement
+const THRUST        = 900;   // px/s^2 at full throttle with an empty storage
+const DRAG          = 2.2;   // per second; higher = stops sooner (top speed ~ THRUST/DRAG)
+const SPOOL_TIME    = 0.35;  // seconds for the throttle to spool up/down (longer with spare parts aboard)
+const TILT_PER_SPEED= 0.0012;// radians of tilt per px/s of horizontal speed
+const ROT_STIFFNESS = 40;    // how hard the sub rotates back toward its target tilt
+const ROT_DAMPING   = 3.5;   // low = wobbly, high = stiff
+const BOUNCE        = 0.45;  // fraction of impact speed kept after hitting rock
+const HIT_SPEED     = 170;   // px/s into the wall needed for an impact to count
+const BASE_SINK     = 10;    // px/s the sub settles down at with nothing aboard
+// Hull + parts
+const MAX_HP        = 200;   // the carcass. 0 = implosion
+const HIT_DAMAGE    = 20;
+const HULL_IMMUNITY = 1.0;   // seconds between hull hits
+// Parts break in two stages: a bad roll leaves a part DAMAGED (still works), the next one breaks it.
+// Only ONE part on the side that hit rolls per impact, and harder hits roll higher.
+const PART_CHANCE_SOFT    = 0.15; // roll chance for a hit just over HIT_SPEED
+const PART_CHANCE_HARD    = 0.5;  // ...for a slam at HARD_HIT_SPEED or faster
+const HARD_HIT_SPEED      = 400;
+const STORAGE_CHANCE_MULT = 1.5;  // storage is the most fragile
+const PART_IMMUNITY = 1.5;   // per part, after it rolls
+const PROP_BUMPS    = 3;     // creature bumps before the propeller dies
+const PROP_BUMP_CHANCE = 0.75; // a creature touch doesn't always land on the propeller
+// Engine, power, air
+const PREVENTION_CHANCE  = 0.25; // rock hit that did hull damage -> engine safety shutdown
+const REPORT_LEAD        = 0.5;  // terminal reports this long BEFORE the engine actually stops
+const RESTART_PREVENTION = 2.0;  // hold E with your hand on the engine
+const TERMINAL_BACKUP    = 7.0;  // terminal stays readable this long after power drops
+const RED_LIGHT_TIME     = 30;   // emergency light, then pitch dark
+const SUFFOCATE_TIME     = 60;   // seconds of air without a working air generator
+const AIR_REFILL         = 0.05; // fraction per second while the air generator runs
+const CRANK_EFFECT       = 0.6;  // hand crank cuts air loss by this much while it's turning
+const CRANK_WINDOW       = 0.4;  // seconds the crank counts as turning after you last moved it
+const BOOT_TIME          = 3.0;  // after turning the breaker back on, nothing works for this long
+const BREAKER_HOLD       = 0.5;
+// Fuel (fraction of the tank per second)
+const FUEL_IDLE   = 0.0012;  // engine running
+const FUEL_LIGHTS = 0.0003;
+const FUEL_SONAR  = 0.0004;  // sonar switched on
+const FUEL_PING   = 0.0015;  // per directional ping (module)
+const FUEL_PING_OMNI = 0.0025; // per all-around ping (built in)
+const FUEL_PUMP   = 0.0006;
+const FUEL_THRUST = 0.0012;  // at full throttle
+// Water
+const BUCKET        = 0.05;  // water trapped by one hatch cycle (module in or out of a slot)
+const PUMP_RATE     = 0.005; // per second = one bucket per 10 s
+const ASCEND_LOCK   = 0.3;   // above this much water you can't climb
+const BAY_FLOOD     = 0.8;   // a malfunction floods the (sealed) engine room this full; opening the door lets it out
+const SHAFT_LEAK    = 0.02;  // per second (cabin-equivalent) through the shaft while the bay is open with a dead propeller
+const HULL_LEAK     = 0.008; // per second at 0 hull; leaking starts below HULL_LEAK_FROM and grows with damage
+const HULL_LEAK_FROM= 0.8;
+const DOOR_FLOW     = 0.12;  // per second (cabin-equivalent) through the fully open bay door, scaled by the level difference
+const WATER_SHORT   = 0.4;   // cabin water above this shorts the terminal...
+const WATER_DRY     = 0.05;  // ...and it stays dead until the water is back down to this
+const DROWN_RATE    = 0.05;  // extra air lost per second while your head is under water
+const SLOSH_K       = 9;     // water surface spring (higher = faster slosh)
+const SLOSH_DAMP    = 1.6;
+const SLOSH_PUSH    = 0.0009;// how hard the sub's acceleration throws the water sideways
+const DRY_SPARK_TIME= 1.5;   // pump running dry sparks this long, then explodes
+const PUMP_BLAST_AIR= 0.25;  // air lost when the pump explodes
+// Repairs + spare parts
+// Mid-dive repairs: hold the right part, touch the broken thing, press E, then play its minigame (uses the part up)
+const RIVETS           = 3;    // METAL: hammer this many rivets (engine: one more); E when the swinging marker is in the green
+const RIVET_SPEED      = 0.8;  // marker sweeps across the bar per second (each rivet a bit faster)
+const RIVET_ZONE       = 0.18; // width of the green zone (fraction of the bar)
+const SCREW_TURNS      = 2.5;  // PIPE: circle the mouse clockwise this many turns to tighten the fitting
+const FILTER_TIME      = 3.0;  // FILTER: seconds of pushing (hold E) with the cartridge lined up under the guide
+const FILTER_SLACK     = 0.12; // how far off the guide (fraction of the track) still slides in
+const DOCK_REPAIR_TIME = 1.5;  // free while docked
+const MAX_PARTS        = 6;    // spare parts + gas canisters the storage holds (horn charges have their own rack)
+const START_PARTS      = ['METAL', 'PIPE', 'FILTER'];   // in storage at the start of a run
+const SCRAP_MIX        = ['METAL', 'METAL', 'PIPE', 'FILTER'];   // what a piece of scrap turns out to be (random pick)
+const ITEM_SLIDE       = 140;  // px/s^2 loose items slide per radian of tilt
+const LOW_AIR_BLUR     = 0.55; // below this much air your vision starts to blur
+const PART_SINK        = 6;    // px/s extra sink per spare part aboard (stored, carried or on the floor)
+const PART_MASS        = 0.12; // extra inertia per spare part aboard
+const SCRAP_SIZE       = 10;
+const SCRAP_GRAB_TIME  = 0.6;
+const SCRAP_PER_DIVE   = 6;
+// Dives + quota
+const DOCK_TIME        = 60;   // free repair minute at the start of each dive
+const DIVES_PER_QUOTA  = 3;
+const QUOTA_START      = 600;
+const QUOTA_GROWTH     = 1.35;
+const HULL_FREE_FRACTION = 0.51; // free hull repair between dives only goes up to this
+const HULL_HIT_COST    = 100;  // coins for +1 hit (HIT_DAMAGE hp) of hull at the dock
+const DIVE_RETURN_Y    = 160;  // come back above this to end a dive
+const DIVE_MIN_DEPTH   = 500;  // ...after having been at least this deep
+// Sonar
+const DOT_FADE_TIME = 6.0;
+const MURK_RADIUS   = 380;   // px, hard cutoff: murky water kills the ping here
+const SOUND_SPEED   = 650;
+const PING_COOLDOWN = 0.7;
+// All-around ping (right mouse): built into the hull, needs no module. 360 degrees, but crude:
+// coarse rays, blurry returns smeared far along walls, more dropout, dimmer. Shows walls, not details.
+const OMNI_RAYS         = 150;   // around the full circle (the directional cone packs 70 into ~50 degrees)
+const OMNI_COOLDOWN     = 1.6;
+const OMNI_JITTER       = 0.2;   // error along the surface (directional: 0.07)
+const OMNI_DEPTH_JITTER = 0.05;  // error into/out of the surface (directional: 0.012)
+const OMNI_DROPOUT      = 0.6;   // chance a return at the murk edge is lost (directional: 0.55)
+const OMNI_BRIGHT       = 0.85;  // returns are dimmer...
+const OMNI_BLOB         = 1.7;   // ...and fuzzier (blob size multiplier)
+const OMNI_NOISE        = 10;    // more static
+const PING_SPREAD   = 0.9;   // radians, width of the ping cone
+const PING_RAYS     = 70;
+const SONAR_PORT_ARC= 1.3;   // radians each side of the slot's facing the cone can be aimed
+const SONAR_JITTER   = 0.07;  // position error ALONG the wall surface, as a fraction of distance
+const SONAR_DEPTH_JITTER = 0.012; // error into/out of the wall: small, so you only see the wall's outer skin
+const SONAR_DROPOUT  = 0.55;
+const SONAR_DIST_FADE= 0.75;
+const SONAR_BLOB     = 11;    // px (world), glow radius of one return
+const SONAR_NOISE    = 3;
+const SONAR_FLICKER  = 0.3;
+const SONAR_COLOR    = '#7ef';  // wavefront / echo specks
+const MAX_DOTS       = 6000;
+const SONAR_BLOB_ALPHA = 0.5;
+const SONAR_NEAR_THIN  = 220;  // px: wall returns closer than this get thinned out (keeps blob spacing even at any range)  // per-return brightness; overlaps add up, so lower = less blown-out when you ping one spot a lot
+// Creature
+const CREATURE_SIZE     = 70;
+const CREATURE_DAMAGE   = 30;
+const CREATURE_KNOCKBACK= 500;
+const CREATURE_DOT_FADE = 9.0;
+// Shockwave horn (module): compressed air charges, no power cost. Fire with Q (or the button) from the chair.
+const HORN_CHARGES    = 3;     // compressed-air charges per dive: one loaded in the horn, the rest in storage. Refilled at the dock
+const RELOAD_TIME     = 1.5;   // carry a charge to the horn module, hold E: loaded (the horn holds one)
+const HORN_RANGE      = 260;   // px the shockwave travels
+const HORN_SPEED      = 700;   // px/s
+const HORN_ARC        = 1.0;   // radians each side of the slot's facing
+const HORN_PUSH       = 320;   // px/s the shockwave shoves a creature away
+const HORN_RECOIL     = 60;    // px/s kick on the sub, opposite the blast
+const CREATURE_RETURN = 20;    // px/s a shoved creature drifts back home
+const CHARGE_AIR      = 0.15;  // carry a charge, hold E to open its valve: this much air (a full one). It's compressed air, so it's breathable
+const CHARGE_LEAK     = [5, 8];// broken storage: every stored charge bleeds empty in 5 to 8 s (into the cabin air) - carry them out fast
+// Gas canisters (gasoline): pour one into the engine for fuel
+const GAS_FUEL        = 0.33;  // fuel per canister
+const POUR_TIME       = 2.0;   // hold E on the engine with a canister in your hand
+const START_GAS       = 1;     // in storage at the start of a run
+const GAS_COST        = 60;    // coins for another one at the dock (B)
+// Loot + robot arm
+const RELIC_SIZE     = 16;
+const RELIC_VALUE    = 125;    // the two bait relics by the creature
+const RELIC_VALUE_UPPER = 75; // on ledges and boulders in the trench
+const RELIC_VALUE_RUINS = 175; // down in Atlantis: deeper = richer
+const RELIC_COLOR    = '#fd3';
+const UPPER_RELICS_PER_DIVE = 2; // + 2 bait by the creature
+const RUIN_RELICS_PER_DIVE  = 4;
+const ARM_REACH      = 90;
+const ARM_SLIDE_SPEED= 140;    // px/s the arm base runs along its rail
+const CLAW_RADIUS    = 6;
+const TIE_TIME       = 1.5;
+const BALLOON_SPEED  = 400;
+const ARM_MAX_HITS   = 2;
+// Shake
+const SHAKE_TIME     = 0.35;
+const SHAKE_WALL     = 6;
+const SHAKE_CREATURE = 22;
+// Crew: the stick figure and his hand (interior px)
+const FIG_HEIGHT     = 50;     // feet to top of the head
+const HAND_REACH     = 38;     // shoulder to hand
+const HAND_BEHIND    = 4;      // how far behind his own shoulder he can reach
+const FLIP_DEADZONE  = 3;      // mouse must be this far past his shoulder before he flips to face it
+const WALK_SPEED     = 30;
+const WALK_ACCEL     = 220;    // so he doesn't start/stop like a robot
+const STUMBLE_TIME   = 0.5;
+const STUMBLE_SPEED  = 50;
+const HATCH_TURNS    = 1.5;    // wheel turns from sealed to open
+// Camera
+const ZOOM_STANDING  = 3;      // shrinks to fit small windows
+const ZOOM_TIME      = 0.6;
+const DIM_STANDING   = 0.3;
+const SUB_VIS_TILT   = 0.5;    // fraction of the physics wobble that's drawn
+const STAND_UP_TIME  = 0.5;
+
+// ===================== WORLD: THE TRENCH =====================
+// One fixed level. Built from a seeded random so it's identical every run (hand-shaped, just not hand-typed).
+// A wide mouth narrows into a tight throat where the creature waits, then opens into the Atlantis cavern.
+// Everything solid is a polygon: { pts, kind ('rock' | 'ruin'), bbox x0..x1 / y0..y1, segs (edges + tangents) }.
+let seed = 20261027;
+const srand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+const LEVEL_W = 2000, LEVEL_BOTTOM = 5900;
+const CAVERN_FLOOR = 5440;     // top of the Atlantis cavern floor
+const THROAT_Y = 3350;         // narrowest part, where the creature waits
+const trenchCenter = y => 1000 + 150 * Math.sin(y / 850) + 60 * Math.sin(y / 310 + 1);
+// Half width of open water at each depth, smoothly blended between these keys
+const WIDTH_KEYS = [[-400, 900], [300, 700], [1400, 400], [2400, 340], [3000, 320], [3600, 310], [4050, 450], [4500, 900], [LEVEL_BOTTOM, 950]];
+function trenchHalfWidth(y) {
+  for (let i = 1; i < WIDTH_KEYS.length; i++) {
+    const [y0, w0] = WIDTH_KEYS[i - 1], [y1, w1] = WIDTH_KEYS[i];
+    if (y <= y1) { const f = Math.max(0, Math.min(1, (y - y0) / (y1 - y0))), s = f * f * (3 - 2 * f); return w0 + (w1 - w0) * s; }
+  }
+  return WIDTH_KEYS[WIDTH_KEYS.length - 1][1];
+}
+// Jagged wall faces: smooth wander + random chips every WALL_STEP px
+const WALL_STEP = 45, wallL = [], wallR = [];
+for (let y = -400; y <= LEVEL_BOTTOM; y += WALL_STEP) {
+  const c = trenchCenter(y), hw = trenchHalfWidth(y), jag = () => (srand() - 0.5) * 44;
+  wallL.push([c - hw + 32 * Math.sin(y / 97) + 18 * Math.sin(y / 37 + 2) + jag(), y]);
+  wallR.push([c + hw + 32 * Math.sin(y / 113 + 1) + 18 * Math.sin(y / 43) + jag(), y]);
+}
+// x of a wall face at depth y (side -1 = left, 1 = right)
+function wallX(side, y) {
+  const a = side < 0 ? wallL : wallR, i = Math.max(0, Math.min(a.length - 2, Math.floor((y + 400) / WALL_STEP)));
+  return a[i][0] + (a[i + 1][0] - a[i][0]) * (y - a[i][1]) / WALL_STEP;
+}
+const SOLIDS = [];
+function addSolid(pts, kind = 'rock') {
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]), segs = [];
+  for (let i = 0; i < pts.length; i++) {
+    const [ax, ay] = pts[i], [bx, by] = pts[(i + 1) % pts.length], l = Math.hypot(bx - ax, by - ay) || 1;
+    segs.push({ ax, ay, bx, by, tx: (bx - ax) / l, ty: (by - ay) / l });
+  }
+  SOLIDS.push({ pts, kind, segs, x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) });
+}
+const box = (x, y, w, h, kind = 'ruin') => addSolid([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], kind);
+// The two walls (everything outside the faces is rock)
+addSolid([[-600, -400], ...wallL, [-600, LEVEL_BOTTOM]]);
+addSolid([[LEVEL_W + 600, -400], ...wallR, [LEVEL_W + 600, LEVEL_BOTTOM]]);
+// Cavern floor: bumpy, rising toward the walls like a bowl
+{
+  const pts = [];
+  for (let x = -100; x <= LEVEL_W + 200; x += 70) {
+    const edge = Math.max(0, Math.abs(x - trenchCenter(5400)) - 650);
+    pts.push([x, CAVERN_FLOOR + 28 * Math.sin(x / 130) + 14 * Math.sin(x / 47) + (srand() - 0.5) * 18 - edge * 0.45]);
+  }
+  addSolid([...pts, [LEVEL_W + 200, LEVEL_BOTTOM + 100], [-100, LEVEL_BOTTOM + 100]]);
+}
+// Overhanging ledges sticking out of a wall, sloping down. Returns a spot on top (for loot).
+function ledge(side, y, len) {
+  const wx = wallX(side, y), d = -side;
+  addSolid([[wx - d * 40, y - 25], [wx + d * len, y + 5], [wx + d * len * 0.7, y + 22], [wx + d * len * 0.3, y + 36], [wx - d * 40, y + 50]]);
+  return [wx + d * len * 0.5, y - 30];
+}
+// Lumpy floating boulders. Returns a spot on top.
+function boulder(x, y, r) {
+  const pts = [];
+  for (let i = 0; i < 14; i++) { const a = i / 14 * Math.PI * 2, rr = r * (0.75 + srand() * 0.4); pts.push([x + Math.cos(a) * rr, y + Math.sin(a) * rr * 0.8]); }
+  addSolid(pts);
+  return [x, y - r - 10];
+}
+const LEDGES = [ledge(-1, 800, 230), ledge(1, 1250, 200), ledge(-1, 1950, 150), ledge(1, 2600, 130), ledge(-1, 4250, 240), ledge(1, 4380, 220)];
+const BOULDERS = [boulder(trenchCenter(450) + 270, 450, 80), boulder(trenchCenter(1600) - 130, 1600, 60),
+                  boulder(trenchCenter(4800) + 420, 4800, 90), boulder(trenchCenter(4950) - 480, 4950, 70)];
+
+// ----- Atlantis: ruins on the cavern floor (kind 'ruin' = pale returns on sonar) -----
+const RX = Math.round(trenchCenter(5300)), F = CAVERN_FLOOR;
+// Stepped temple with columns, roof and pediment (one column snapped short)
+box(RX - 180, F - 60, 360, 140); box(RX - 140, F - 110, 280, 60); box(RX - 100, F - 155, 200, 50);
+for (const [cx, h] of [[RX - 85, 150], [RX - 40, 150], [RX + 22, 85], [RX + 67, 150]]) box(cx - 9, F - 155 - h, 18, h);
+box(RX - 105, F - 327, 125, 22); box(RX + 50, F - 327, 55, 22);             // roof slab, broken where the column fell
+addSolid([[RX - 110, F - 327], [RX - 20, F - 382], [RX + 20, F - 372], [RX - 10, F - 327]], 'ruin');  // pediment fragment
+// Colonnade on the left: broken columns, one slab still on top
+for (const [cx, h] of [[RX - 600, 230], [RX - 520, 230], [RX - 440, 150], [RX - 360, 200]]) box(cx - 11, F - h, 22, h + 40);
+box(RX - 612, F - 248, 112, 18);
+// Arch on the right: two pillars and a curved band (in convex chunks)
+box(RX + 340, F - 200, 40, 240); box(RX + 460, F - 200, 40, 240);
+for (let i = 0; i < 6; i++) {
+  const a0 = Math.PI + i / 6 * Math.PI, a1 = Math.PI + (i + 1) / 6 * Math.PI, c = [RX + 420, F - 200];
+  addSolid([[c[0] + Math.cos(a0) * 80, c[1] + Math.sin(a0) * 80], [c[0] + Math.cos(a1) * 80, c[1] + Math.sin(a1) * 80],
+            [c[0] + Math.cos(a1) * 40, c[1] + Math.sin(a1) * 40], [c[0] + Math.cos(a0) * 40, c[1] + Math.sin(a0) * 40]], 'ruin');
+}
+// Domed building, far right
+box(RX + 580, F - 140, 220, 180);
+{ const pts = []; for (let i = 0; i <= 16; i++) { const a = Math.PI + i / 16 * Math.PI; pts.push([RX + 690 + Math.cos(a) * 105, F - 140 + Math.sin(a) * 105]); } addSolid(pts, 'ruin'); }
+// Tower with crenellations, far left
+box(RX - 800, F - 420, 80, 460);
+for (let i = 0; i < 3; i++) box(RX - 800 + i * 31, F - 445, 18, 26);
+// Fallen column and a jagged wall fragment
+{
+  const c = [RX - 240, F - 18], a = 0.18, hl = 85, hw = 12, ca = Math.cos(a), sa = Math.sin(a);
+  addSolid([[-hl, -hw], [hl, -hw], [hl, hw], [-hl, hw]].map(([x, y]) => [c[0] + x * ca - y * sa, c[1] + x * sa + y * ca]), 'ruin');
+}
+addSolid([[RX + 200, F + 40], [RX + 200, F - 80], [RX + 230, F - 100], [RX + 260, F - 70], [RX + 290, F - 115], [RX + 310, F - 60], [RX + 310, F + 40]], 'ruin');
+
+// ----- Placing things -----
+function solidAt(x, y) {
+  for (const s of SOLIDS) if (x > s.x0 && x < s.x1 && y > s.y0 && y < s.y1 && inPoly({ x, y }, s.pts)) return true;
+  return false;
+}
+// Drop a loot spot onto whatever surface is below it (rising out first if it starts inside something)
+function settle([x, y], half) {
+  for (let i = 0; i < 200 && solidAt(x, y + half); i++) y -= 4;
+  for (let d = 0; d < 500; d += 2) if (solidAt(x, y + half + d + 1)) return [x, y + d];
+  return [x, y];
+}
+const DOCK_X = Math.round(trenchCenter(100)), DOCK_Y = 100;
+// The creature hugs the left wall of the throat: you have to squeeze past it to reach Atlantis
+let CREATURE_HOME = [wallX(-1, THROAT_Y) + 75, THROAT_Y];
+while ([0, 1, 2, 3, 4, 5, 6, 7].some(i => solidAt(CREATURE_HOME[0] + Math.cos(i * Math.PI / 4) * 40, CREATURE_HOME[1] + Math.sin(i * Math.PI / 4) * 40))) CREATURE_HOME[0] += 5;
+// Loot. Deeper = richer: ruins relics are worth the most.
+const RELIC_BAIT = [[CREATURE_HOME[0] + 95, THROAT_Y - 70], [CREATURE_HOME[0] + 40, THROAT_Y + 105]];   // floating by the creature
+const RELIC_UPPER = [...LEDGES.slice(0, 4), ...BOULDERS.slice(0, 2)].map(p => settle(p, RELIC_SIZE / 2));
+const RELIC_RUINS = [[RX - 20, F - 200], [RX - 160, F - 130], [RX - 560, F - 100], [RX + 420, F - 60], [RX + 690, F - 300],
+                     [RX - 760, F - 480], [RX - 240, F - 80], [RX + 255, F - 160], [RX + 860, F - 80], [RX - 900, F - 60]]
+                     .map(p => settle(p, RELIC_SIZE / 2));
+const SCRAP_POOL = [...LEDGES.slice(4).map(p => settle(p, SCRAP_SIZE / 2)), ...BOULDERS.slice(2).map(p => settle(p, SCRAP_SIZE / 2)),
+                    [wallX(-1, 1100) + 45, 1100], [wallX(1, 2200) - 45, 2200], [wallX(-1, 2900) + 45, 2900], [wallX(1, 3900) - 45, 3900],
+                    ...[[RX - 450, F - 50], [RX + 120, F - 40], [RX + 560, F - 40], [RX - 700, F - 40]].map(p => settle(p, SCRAP_SIZE / 2))];
+
+// ===================== SUB LAYOUT =====================
+// Traced from the sketch. Sub-local px, origin = sub position, front (nose) is RIGHT. About 240x102.
+// Engine room top-left, propeller hanging under it, crew room on the right, diagonal back-bottom wall.
+const HULL_OUTLINE = [[-120, -51], [106, -51], [112, -40], [116, -24], [119, -5], [119, 12], [117, 30], [112, 51],
+                      [-15, 51], [-49, 1], [-120, 1]];
+const CREW_ROOM = [[-35, -36], [102, -36], [110, 0], [107, 41], [6, 41], [-11, 33], [-27, 15], [-37, 3]];
+const ENGINE_ROOM = [-113, -45, 64, 42];          // [x, y, w, h]
+const DOOR = [-43, -25, 6, 28];                   // yellow door slab between engine room and crew room
+const DOOR_GAP = [-49, -25, 14, 28];              // the hole in the wall it closes
+const ENGINE_BOX = [-102, -41, 40, 33];           // touch it to restart
+const BREAKER_POS = [-56, -14];                   // inside the engine bay
+const WHEEL_POS = [-20, -19], WHEEL_R = 12;       // the door's hand wheel, crew room side
+const CRANK_POS = [24, 6], CRANK_R = 6;           // air hand crank on the back wall
+const STORAGE_POLY = [[46, -36], [102, -36], [105, -25], [58, -25]];
+const PANEL_POLY = [[96, -25], [104, -25], [110, 0], [107, 41], [82, 41], [82, 16], [95, 12]];
+const PUMP_BOX = [5, 42, 23, 8];                  // blue, in the floor next to the floor slot
+const PROP_POS = [-85, 40];                       // propeller disc under the engine room
+const CHAIR_X = 62;                               // where you sit
+const SIT_RANGE = [24, 52];                       // stand here to sit down
+const WALK_X = [-24, 80];                         // walkable span (left end climbs the slope)
+const BODY_CENTER = [0, 0];
+// Feet height along the floor: flat on the right, slopes up along the diagonal wall on the left
+function footY(x) {
+  if (x >= 6) return 41;
+  if (x >= -11) return 33 + (x + 11) / 17 * 8;
+  return 15 + (x + 27) / 16 * 18;
+}
+// Red module slots: center, size, rotation, and the direction each faces (sonar can only aim within its arc)
+const SLOTS = [
+  { name: 'TOP',   c: [-2, -43], w: 34, h: 11, ang: 0,    face: [0, -1] },
+  { name: 'NOSE',  c: [112, 0],  w: 10, h: 35, ang: 0,    face: [1, 0] },
+  { name: 'DIAG',  c: [-24, 28], w: 26, h: 9,  ang: 0.97, face: [-0.83, 0.56] },
+  { name: 'FLOOR', c: [45, 46],  w: 33, h: 8,  ang: 0,    face: [0, 1] },   // the only slot the pump works in
+];
+const FLOOR_SLOT = 3;
+// Robot arm rail: the green line under the hull (back diagonal, bottom, up the nose)
+const RAIL = [[-53, 7], [-17, 56], [116, 56], [123, 18]];
+const SUB_BOXES = [[-120, -51, 71, 52], [-49, -51, 17, 52], [-32, -51, 152, 102]];
+const MODULE_COLORS = { SONAR: '#1b2b22', PUMP: '#1b2238', HORN: '#2e2a1b', AIR: '#1b2e2e' };
+
+// ===================== STATE =====================
+const cv = document.getElementById('c');
+let ctx = cv.getContext('2d');           // swapped to an offscreen canvas when snapshotting frozen screens
+const keys = {}, mouse = { x: 0, y: 0, down: false, rdown: false };
+let sub, cam, dots, pings, echoes, pingTimer, omniTimer, time, runTime;
+let relics, scraps, arm, coins, paid, quota, divesDone, quotasMet, phase, dockT, maxDepth;
+let engine, gen, sys, air, fuel, water, engWater, slosh, termShorted, items, parts, modules, hatch, crank, grip, carry, inv, hold;
+let mode, standT, fig, hand, shake, shakeAmp, shakeBias, propAng, zoomT, throttle, frozenThrottle, darkT;
+let failReason, pumpSpark, snapshot, termButtons = [], invButtons = [];
+let creature, hornWaves;
+let viewScale = 1;
+let logLines = [];
+
+function reset() {
+  sub = { x: DOCK_X, y: DOCK_Y, vx: 0, vy: 0, ang: 0, angV: 0, hp: MAX_HP, hullImm: 0, dead: false };
+  cam = { x: DOCK_X, y: DOCK_Y };
+  time = 0; runTime = 0;
+  coins = 0; paid = 0; quota = QUOTA_START; divesDone = 0; quotasMet = 0;
+  fuel = 1; air = 1; water = 0;
+  // Water: cabin level (water, 0..1 of the cabin height) and engine room level (engWater, 0..1 of its height).
+  // slosh = the surface's extra tilt from the sub's acceleration (a damped spring)
+  engWater = 0; slosh = { a: 0, v: 0, lastVx: 0 }; termShorted = false;
+  // Loose items: spare parts (PIPE, FILTER, METAL), gas canisters (GAS) and horn charges (CHARGE). where: 'storage' | 'hand' | 'floor'
+  // (the dock tops the charges up)
+  items = [...START_PARTS.map(type => ({ type, where: 'storage' })), ...Array.from({ length: START_GAS }, () => ({ type: 'GAS', where: 'storage' }))];
+  // Engine: 'running' | 'off'. report = why it's off. stopIn > 0 = report shown, engine still turning.
+  engine = { state: 'running', report: null, stopIn: 0, flooded: false };
+  gen = { on: true, boot: 0 };
+  sys = { sonar: true, pump: false, lights: true };
+  parts = {
+    propeller: { broken: false, bumps: 0, imm: 0 },
+    panel:     { broken: false, imm: 0 },
+    storage:   { broken: false, imm: 0 },
+    pumpMech:  { broken: false, dead: false, imm: 0 }, // dead = exploded, gone for the run
+  };
+  // Modules: slot index, or -1 = in storage (carried = in the figure's hand)
+  modules = [
+    { id: 'AIR',   slot: 0, broken: false, imm: 0, carried: false },
+    { id: 'SONAR', slot: 1, broken: false, imm: 0, carried: false },
+    { id: 'PUMP',  slot: FLOOR_SLOT, broken: false, imm: 0, carried: false },
+    { id: 'HORN',  slot: -1, broken: false, imm: 0, carried: false, loaded: 0 },   // loaded = air in its charge (0 = empty)
+  ];
+  creature = { x: CREATURE_HOME[0], y: CREATURE_HOME[1], vx: 0, vy: 0 };
+  hornWaves = [];
+  arm = { u: railLength() * 0.55, tipX: DOCK_X, tipY: DOCK_Y, ox: 0, oy: 40, held: null, tie: 0, hits: 0, broken: false };
+  hatch = { progress: 0 };                 // engine bay door: 0 sealed, 1 open
+  crank = { lastT: -9, ang: 0 };
+  grip = null;                             // wheel/crank the hand is holding: { id, last }
+  carry = null;                            // what's in the hand: a module or an item
+  inv = { open: false };                   // storage inventory window
+  hold = { id: null, t: 0, lock: false };
+  fix = null; fixSaved = {};
+  mode = 'seated'; standT = 0; zoomT = 0;
+  fig = { x: 30, vx: 0, face: 1, stun: 0, walk: 0 };
+  hand = { x: 50, y: 0 };
+  shake = 0; shakeAmp = 0; shakeBias = 0; propAng = 0; darkT = 0; pumpSpark = 0;
+  throttle = { x: 0, y: 0 }; frozenThrottle = null; snapshot = null;
+  failReason = null;
+  dots = []; pings = []; echoes = []; pingTimer = 0; omniTimer = 0;
+  logLines = [];
+  startDock(true);
+}
+
+// ===================== HELPERS =====================
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const dist = (a, [x, y]) => Math.hypot(a.x - x, a.y - y);
+const inRect = (p, [x, y, w, h], pad = 0) => p.x > x - pad && p.x < x + w + pad && p.y > y - pad && p.y < y + h + pad;
+function inPoly(p, pts) {
+  let c = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i], [xj, yj] = pts[j];
+    if ((yi > p.y) !== (yj > p.y) && p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi) c = !c;
+  }
+  return c;
+}
+const power = () => engine.state === 'running' && gen.on && gen.boot <= 0;
+const panelOk = () => !parts.panel.broken;
+const terminalAlive = () => !termShorted && (power() || darkT < TERMINAL_BACKUP);
+// Items
+const ITEM_TYPES = {
+  PIPE:     { name: 'COMPRESSION PIPE', short: 'PIPE' },     // fixes the pump (mechanism and module)
+  FILTER:   { name: 'AIR FILTER',       short: 'FILTER' },   // fixes the air generator
+  METAL:    { name: 'METAL PART',       short: 'METAL' },    // fixes everything else, including a malfunctioned engine
+  GAS:      { name: 'GAS CANISTER',     short: 'GAS' },      // gasoline: +33% fuel poured into the engine
+  CHARGE:   { name: 'SHOCKWAVE CHARGE', short: 'CHARGE' },   // compressed air: horn ammo, or emergency air
+};
+const isItem = c => c && !!c.type;
+const carriedName = c => isItem(c) ? ITEM_TYPES[c.type].short : c.id;
+const sparesAboard = () => items.filter(i => i.type !== 'CHARGE').length;            // weight (parts and gasoline)
+const storedParts = () => items.filter(i => i.where === 'storage' && i.type !== 'CHARGE').length;
+const storedOf = type => items.filter(i => i.where === 'storage' && i.type === type).length;
+const charges = () => storedOf('CHARGE');                                              // spare horn charges
+const storedCharges = () => items.filter(i => i.where === 'storage' && i.type === 'CHARGE');
+const storageLeaking = () => parts.storage.broken && phase === 'dive' && storedCharges().length > 0;
+const mass = () => 1 + sparesAboard() * PART_MASS;
+const moduleIn = slot => modules.find(m => m.slot === slot && !m.carried);
+const mod = id => modules.find(m => m.id === id);
+const installed = id => { const m = mod(id); return m.slot >= 0 && !m.carried && !m.broken; };
+const sonarWorks = () => power() && panelOk() && sys.sonar && installed('SONAR');   // directional (module)
+const omniWorks = () => power() && panelOk() && sys.sonar;                          // all-around (built in)
+const pumpRunning = () => { const p = moduleIn(FLOOR_SLOT); return sys.pump && power() && p && p.id === 'PUMP' && !p.broken && !parts.pumpMech.broken && !parts.pumpMech.dead; };
+const airMaking = () => power() && installed('AIR');
+const armWorks = () => !arm.broken && power() && panelOk();
+const crankTurning = () => time - crank.lastT < CRANK_WINDOW;
+const doorOpenTo = () => 3 - 28 * hatch.progress;  // door slides up: the gap is open below this y
+const shuffle = a => { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+
+const visAng = () => sub.ang * SUB_VIS_TILT;
+function subPoint([lx, ly]) {
+  const a = visAng(), c = Math.cos(a), s = Math.sin(a);
+  return { x: sub.x + lx * c - ly * s, y: sub.y + lx * s + ly * c };
+}
+function toLocal(p) {
+  const a = -visAng(), c = Math.cos(a), s = Math.sin(a), dx = p.x - sub.x, dy = p.y - sub.y;
+  return { x: dx * c - dy * s, y: dx * s + dy * c };
+}
+const subBoxes = () => SUB_BOXES.map(([x, y, w, h]) => ({ x: sub.x + x, y: sub.y + y, w, h }));
+const mouseWorld = () => ({ x: (mouse.x - cv.width / 2) / viewScale + cam.x, y: (mouse.y - cv.height / 2) / viewScale + cam.y });
+const zoomEase = () => zoomT * zoomT * (3 - 2 * zoomT);
+// Is a sub-local point inside a slot (in the slot's own rotated frame)?
+function slotAt(p, pad = 4) {
+  for (let i = 0; i < SLOTS.length; i++) {
+    const s = SLOTS[i], c = Math.cos(-s.ang), sn = Math.sin(-s.ang), dx = p.x - s.c[0], dy = p.y - s.c[1];
+    const lx = dx * c - dy * sn, ly = dx * sn + dy * c;
+    if (Math.abs(lx) < s.w / 2 + pad && Math.abs(ly) < s.h / 2 + pad) return i;
+  }
+  return -1;
+}
+// Rail: polyline math so the arm base can run along it
+function railLength() { let L = 0; for (let i = 1; i < RAIL.length; i++) L += Math.hypot(RAIL[i][0] - RAIL[i - 1][0], RAIL[i][1] - RAIL[i - 1][1]); return L; }
+function railPoint(u) {
+  for (let i = 1; i < RAIL.length; i++) {
+    const [ax, ay] = RAIL[i - 1], [bx, by] = RAIL[i], l = Math.hypot(bx - ax, by - ay);
+    if (u <= l || i === RAIL.length - 1) { const f = clamp(u / l, 0, 1); return [ax + (bx - ax) * f, ay + (by - ay) * f]; }
+    u -= l;
+  }
+}
+function railClosest(p) {
+  let best = 0, bd = Infinity, acc = 0;
+  for (let i = 1; i < RAIL.length; i++) {
+    const [ax, ay] = RAIL[i - 1], [bx, by] = RAIL[i], l = Math.hypot(bx - ax, by - ay);
+    const f = clamp(((p.x - ax) * (bx - ax) + (p.y - ay) * (by - ay)) / (l * l), 0, 1);
+    const d = Math.hypot(ax + (bx - ax) * f - p.x, ay + (by - ay) * f - p.y);
+    if (d < bd) { bd = d; best = acc + f * l; }
+    acc += l;
+  }
+  return best;
+}
+
+// Seated monitors
+function monitorLayout() {
+  const W = cv.width, H = cv.height;
+  const R = Math.min(H * 0.34, W * 0.24), tw = Math.min(W * 0.3, 380), gap = 40;
+  const cx = (W - (2 * R + gap + tw)) / 2 + R, cy = H / 2 + 45;
+  return { cx, cy, R, tx: cx + R + gap, ty: cy - R - 30, tw, th: 2 * R + 60 };
+}
+function sonarMouseWorld() {
+  const L = monitorLayout(), k = MURK_RADIUS / L.R;
+  return { x: sub.x + (mouse.x - L.cx) * k, y: sub.y + (mouse.y - L.cy) * k };
+}
+
+// ===================== AUDIO =====================
+// Everything is synthesized here, no sound files. Every sound goes into one master bus, then a "muffle" low-pass
+// (it closes when your head is under water or you're running out of air), then out. Big ocean sounds also go
+// through a long dark reverb. Loops (engine, pump, water, creature) are always running and just faded in and out.
+const MASTER_VOL = 0.8;
+let actx = null, bus = null, noiseBuf = null, loops = null, muted = false;
+function initAudio() {
+  if (actx) { if (actx.state === 'suspended') actx.resume(); return; }
+  try {
+    actx = new AudioContext();
+    const master = actx.createGain(); master.gain.value = muted ? 0 : MASTER_VOL;
+    const muffle = actx.createBiquadFilter(); muffle.type = 'lowpass'; muffle.frequency.value = 18000;
+    const comp = actx.createDynamicsCompressor();
+    master.connect(muffle); muffle.connect(comp); comp.connect(actx.destination);
+    noiseBuf = actx.createBuffer(1, actx.sampleRate * 2, actx.sampleRate);
+    const nd = noiseBuf.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+    // Reverb: 4 s of decaying noise as the impulse, darkened
+    const len = actx.sampleRate * 4, ir = actx.createBuffer(2, len, actx.sampleRate);
+    for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); let lp = 0; for (let i = 0; i < len; i++) { lp += (Math.random() * 2 - 1 - lp) * 0.25; d[i] = lp * Math.pow(1 - i / len, 2.4); } }
+    const verb = actx.createConvolver(); verb.buffer = ir;
+    const wet = actx.createGain(); wet.gain.value = 0.9; verb.connect(wet); wet.connect(master);
+    bus = { master, muffle, verb };
+    // Loops
+    const noiseLoop = (type, freq, q) => {
+      const src = actx.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+      const f = actx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
+      const g = actx.createGain(); g.gain.value = 0; src.connect(f); f.connect(g); g.connect(master); src.start();
+      return { f, g };
+    };
+    const oscLoop = (type, freq, cut) => {
+      const o = actx.createOscillator(); o.type = type; o.frequency.value = freq;
+      const f = actx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = cut;
+      const g = actx.createGain(); g.gain.value = 0; o.connect(f); f.connect(g); g.connect(master); o.start();
+      return { o, f, g };
+    };
+    loops = {
+      ocean:  noiseLoop('lowpass', 140, 0.7),    // deep rumble, always there
+      eng1:   oscLoop('sawtooth', 42, 240),      // engine: two detuned saws, pitch follows the throttle
+      eng2:   oscLoop('sawtooth', 84.6, 300),
+      wash:   noiseLoop('bandpass', 420, 0.9),   // propeller wash
+      pump:   oscLoop('square', 118, 520),
+      stream: noiseLoop('bandpass', 850, 0.6),   // water pouring through the bay door
+      leak:   noiseLoop('bandpass', 2600, 1.5),  // hull leak trickle
+      hiss:   noiseLoop('highpass', 3200, 0.7),  // gas escaping a broken storage
+      beast:  oscLoop('sawtooth', 31, 110),      // the creature: a sub-bass throb you feel before you see it
+      beast2: oscLoop('sine', 46.5, 200),
+    };
+  } catch (e) { actx = null; }
+}
+const at = (delay = 0) => actx.currentTime + delay;
+const fade = (g, v, tc = 0.12) => g.gain.setTargetAtTime(v, actx.currentTime, tc);
+// One-shot oscillator. opts: glide (end frequency), verb (send to reverb), attack, cut (low-pass)
+function tone(freq, dur, delay = 0, type = 'square', vol = 0.04, opts = {}) {
+  if (!actx || !bus) return;
+  const o = actx.createOscillator(), g = actx.createGain(), t = at(delay), atk = opts.attack || 0.004;
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (opts.glide) o.frequency.exponentialRampToValueAtTime(opts.glide, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + atk); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  let out = o;
+  if (opts.cut) { const f = actx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = opts.cut; o.connect(f); out = f; }
+  out.connect(g); g.connect(bus.master);
+  if (opts.verb) { const s = actx.createGain(); s.gain.value = opts.verb; g.connect(s); s.connect(bus.verb); }
+  o.start(t); o.stop(t + dur + 0.05);
+}
+// One-shot filtered noise. opts: type, freq, glide (end filter freq), q, attack, verb
+function noise(dur, vol, opts = {}) {
+  if (!actx || !bus) return;
+  const src = actx.createBufferSource(), f = actx.createBiquadFilter(), g = actx.createGain(), t = at(opts.delay || 0);
+  src.buffer = noiseBuf; src.playbackRate.value = 0.8 + Math.random() * 0.4;
+  f.type = opts.type || 'lowpass'; f.frequency.setValueAtTime(opts.freq || 1000, t); f.Q.value = opts.q || 0.8;
+  if (opts.glide) f.frequency.exponentialRampToValueAtTime(opts.glide, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + (opts.attack || 0.005)); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(f); f.connect(g); g.connect(bus.master);
+  if (opts.verb) { const s = actx.createGain(); s.gain.value = opts.verb; g.connect(s); s.connect(bus.verb); }
+  src.start(t, Math.random() * 1.5); src.stop(t + dur + 0.05);
+}
+// The sound library
+const SFX = {
+  thud:    () => { noise(0.45, 0.5, { freq: 320, glide: 90 }); tone(62, 0.4, 0, 'sine', 0.35, { glide: 34 }); tone(170 + Math.random() * 40, 0.9, 0.02, 'triangle', 0.035, { verb: 0.6 }); },
+  roar:    () => { noise(1.6, 0.45, { freq: 700, glide: 120, q: 2, attack: 0.08, verb: 0.7 }); tone(44, 1.5, 0, 'sawtooth', 0.22, { glide: 27, cut: 300, attack: 0.05 });
+                   tone(66, 1.2, 0.1, 'sawtooth', 0.12, { glide: 40, cut: 400 }); noise(0.7, 0.15, { type: 'bandpass', freq: 1800, glide: 600, q: 4, delay: 0.05 }); },
+  creak:   () => { const f = 160 + Math.random() * 120; noise(0.8 + Math.random() * 0.9, 0.11, { type: 'bandpass', freq: f, glide: f * (0.6 + Math.random() * 0.3), q: 14, attack: 0.15, verb: 0.5 }); },
+  groan:   () => { tone(95 + Math.random() * 40, 3.5, 0, 'sine', 0.05, { glide: 55, attack: 0.8, verb: 1.2 }); tone(140, 2.5, 0.6, 'sine', 0.02, { glide: 90, attack: 0.6, verb: 1.2 }); },
+  ping:    () => { tone(1380, 1.4, 0, 'sine', 0.09, { glide: 1290, verb: 0.9 }); tone(2760, 0.3, 0, 'sine', 0.015); },
+  omni:    () => { tone(520, 1.8, 0, 'sine', 0.1, { glide: 470, verb: 1.1 }); tone(1040, 0.9, 0, 'sine', 0.025, { glide: 950, verb: 0.6 }); },
+  ret:     b => tone(1300 + Math.random() * 120, 0.12, 0, 'sine', 0.006 + 0.01 * b, { verb: 0.4 }),
+  retBeast:() => { tone(260, 0.9, 0, 'sine', 0.04, { glide: 200, verb: 1 }); tone(277, 0.9, 0, 'sine', 0.03, { glide: 190, verb: 1 }); },
+  horn:    () => { tone(62, 1.5, 0, 'sawtooth', 0.28, { cut: 500, attack: 0.03, verb: 0.8 }); tone(93, 1.3, 0, 'sawtooth', 0.15, { cut: 600, attack: 0.03 }); noise(0.5, 0.3, { freq: 900, glide: 200 }); },
+  clunk:   () => { tone(95, 0.3, 0, 'sine', 0.3, { glide: 55 }); noise(0.12, 0.2, { freq: 1500, glide: 300 }); },
+  gush:    () => noise(0.7, 0.18, { type: 'bandpass', freq: 900, glide: 400, attack: 0.03 }),
+  clink:   () => { tone(1900 + Math.random() * 300, 0.08, 0, 'triangle', 0.04); tone(2900, 0.05, 0.01, 'triangle', 0.02); },
+  drop:    () => { tone(160, 0.12, 0, 'sine', 0.15, { glide: 90 }); tone(1400, 0.06, 0, 'triangle', 0.02); },
+  vent:    () => noise(1.2, 0.18, { type: 'highpass', freq: 2500, glide: 4000, attack: 0.02 }),
+  pour:    () => { noise(1.8, 0.12, { type: 'bandpass', freq: 500, glide: 900, q: 1.5, attack: 0.15 }); for (let i = 0; i < 6; i++) tone(300 + i * 40, 0.08, 0.2 + i * 0.25, 'sine', 0.02); },
+  dry:     () => { tone(90, 0.15, 0, 'square', 0.05, { cut: 600 }); noise(0.1, 0.1, { type: 'highpass', freq: 3000, delay: 0.05 }); },
+  starter: () => { tone(30, 1.1, 0, 'sawtooth', 0.12, { glide: 90, cut: 600, attack: 0.1 }); noise(0.08, 0.2, { type: 'highpass', freq: 2000 }); tone(42, 0.6, 1.0, 'sawtooth', 0.12, { cut: 300 }); },
+  breaker: () => { noise(0.06, 0.4, { type: 'highpass', freq: 1500 }); tone(120, 0.25, 0, 'square', 0.08, { cut: 900 }); },
+  zap:     () => { for (let i = 0; i < 5; i++) noise(0.05, 0.2, { type: 'highpass', freq: 3000, delay: i * 0.06 * Math.random() * 2 }); tone(60, 0.5, 0, 'square', 0.06, { cut: 400 }); },
+  spark:   () => noise(0.04, 0.12, { type: 'highpass', freq: 4000 }),
+  boom:    () => { noise(1.4, 0.7, { freq: 900, glide: 60, verb: 0.6 }); tone(48, 1.2, 0, 'sine', 0.4, { glide: 22 }); },
+  implode: () => { noise(3, 0.8, { freq: 1600, glide: 40, attack: 0.02, verb: 1 }); tone(40, 2.8, 0, 'sawtooth', 0.3, { glide: 18, cut: 300 }); },
+  step:    wet => wet ? noise(0.2, 0.08, { type: 'bandpass', freq: 1100, glide: 600 }) : (noise(0.05, 0.06, { type: 'highpass', freq: 1800 }), tone(130, 0.07, 0, 'triangle', 0.035)),
+  ratchet: () => { tone(2300, 0.02, 0, 'square', 0.015); noise(0.02, 0.05, { type: 'highpass', freq: 3500 }); },
+  squeak:  () => tone(700 + Math.random() * 80, 0.1, 0, 'triangle', 0.012, { glide: 780 }),
+  hammer:  () => { tone(1250, 0.35, 0, 'triangle', 0.09, { verb: 0.3 }); tone(1870, 0.25, 0, 'triangle', 0.05); noise(0.05, 0.25, { type: 'highpass', freq: 2500 }); },
+  miss:    () => { tone(140, 0.12, 0, 'square', 0.05, { cut: 800 }); SFX.spark(); },
+  scrape:  () => noise(0.15, 0.07, { type: 'bandpass', freq: 320, q: 5 }),
+  slide:   () => noise(0.08, 0.035, { type: 'bandpass', freq: 750, q: 2 }),
+  fixed:   () => { tone(660, 0.1, 0, 'triangle', 0.05); tone(880, 0.1, 0.09, 'triangle', 0.05); tone(1320, 0.2, 0.18, 'triangle', 0.05); },
+  sold:    () => { tone(1320, 0.15, 0, 'triangle', 0.04); tone(1760, 0.3, 0.08, 'triangle', 0.04); },
+  inflate: () => noise(1.2, 0.08, { type: 'bandpass', freq: 600, glide: 1400, attack: 0.3 }),
+  alarm:   () => { tone(880, 0.22, 0, 'square', 0.025, { cut: 2000 }); tone(660, 0.22, 0.26, 'square', 0.025, { cut: 2000 }); },
+  heart:   v => { tone(58, 0.14, 0, 'sine', 0.25 * v, { glide: 40 }); tone(52, 0.16, 0.2, 'sine', 0.18 * v, { glide: 38 }); },
+};
+const thud = SFX.thud, roar = SFX.roar;
+function toggleMute() { muted = !muted; if (bus) fade(bus.master, muted ? 0 : MASTER_VOL, 0.05); log(muted ? 'SOUND OFF (M)' : 'SOUND ON', 'good'); }
+// Loops and the ambient one-shots, once a frame
+const amb = { creak: 8, groan: 30, alarm: 0, heart: 0, ret: 0, beast: 0, step: 0 };
+function updateAudio(dt) {
+  if (!actx || !loops) return;
+  const diving = phase === 'dive' && !sub.dead, depth = clamp(sub.y / 5000, 0, 1), t = Math.hypot(throttle.x, throttle.y);
+  fade(loops.ocean.g, sub.dead ? 0.1 : 0.12 + 0.2 * depth, 0.5);
+  const run = power() && !sub.dead;
+  loops.eng1.o.frequency.setTargetAtTime(40 + 38 * t, at(), 0.15); loops.eng2.o.frequency.setTargetAtTime(81 + 75 * t, at(), 0.15);
+  fade(loops.eng1.g, run ? 0.05 + 0.06 * t : 0, 0.25); fade(loops.eng2.g, run ? 0.02 + 0.03 * t : 0, 0.25);
+  fade(loops.wash.g, run && !parts.propeller.broken ? 0.07 * t : 0, 0.2);
+  fade(loops.pump.g, pumpRunning() && !sub.dead ? (pumpSpark > 0 ? 0.045 : 0.025) : 0, 0.1);
+  fade(loops.stream.g, Math.min(0.3, doorStream * 2.5), 0.08);
+  const leaking = diving && sub.hp / MAX_HP < HULL_LEAK_FROM;
+  fade(loops.leak.g, leaking ? 0.015 + 0.05 * (1 - sub.hp / MAX_HP) : 0, 0.3);
+  fade(loops.hiss.g, diving && storageLeaking() ? 0.05 : 0, 0.15);
+  // The creature: a throb that swells as you get close, seen or not
+  const cd = Math.hypot(sub.x - creature.x, sub.y - creature.y), near = diving ? Math.pow(clamp(1 - cd / 480, 0, 1), 1.6) : 0;
+  const throb = 0.6 + 0.4 * Math.sin(time * 4.2);
+  fade(loops.beast.g, 0.22 * near * throb, 0.08); fade(loops.beast2.g, 0.12 * near, 0.2);
+  // Muffle: under water or out of breath, the world goes dull
+  const headY = mode === 'seated' ? CHAIR_HEAD_Y : footY(fig.x) - FIG_HEIGHT + 2, under = crewSurfAt(mode === 'seated' ? CHAIR_X - 3 : fig.x) < headY && diving;
+  const cut = under ? 420 : air < LOW_AIR_BLUR ? 900 + 17000 * (air / LOW_AIR_BLUR) ** 2 : 18000;
+  bus.muffle.frequency.setTargetAtTime(cut, at(), 0.15);
+  // Ambient one-shots: hull creaks (more often deeper and with a beaten hull), distant groans
+  if (diving) {
+    if ((amb.creak -= dt * (0.6 + depth * 1.5 + (1 - sub.hp / MAX_HP) * 1.5)) <= 0) { SFX.creak(); amb.creak = 6 + Math.random() * 12; }
+    if ((amb.groan -= dt * (0.4 + depth)) <= 0) { SFX.groan(); amb.groan = 25 + Math.random() * 30; }
+  }
+  // Emergency alarm while the red light is on; heartbeat when air is low
+  if (!power() && darkT < RED_LIGHT_TIME && diving) { if ((amb.alarm -= dt) <= 0) { SFX.alarm(); amb.alarm = 1.2; } } else amb.alarm = 0;
+  if (air < LOW_AIR_BLUR && !sub.dead) {
+    const f = 1 - air / LOW_AIR_BLUR;
+    if ((amb.heart -= dt) <= 0) { SFX.heart(0.4 + 0.6 * f); amb.heart = 1.1 - 0.6 * f; }
+  }
+  if (pumpSpark > 0 && Math.random() < dt * 14) SFX.spark();
+  amb.ret -= dt; amb.beast -= dt;
+}
+
+// ===================== TERMINAL LOG =====================
+function log(t, sev = 'warn') {
+  logLines.push({ t, c: sev === 'good' ? '#4c8' : sev === 'bad' ? '#e44' : '#fa3' });
+  if (logLines.length > 40) logLines.shift();
+  if (time > 0 && power()) tone(sev === 'bad' ? 300 : sev === 'good' ? 990 : 600, 0.07);
+}
+
+// ===================== DIVES + QUOTA =====================
+// Dock phase: held at the top, 60 s of free repairs, free module swaps, buy hull hits, pay quota.
+function startDock(first) {
+  phase = 'dock'; dockT = DOCK_TIME; maxDepth = 0; fix = null; fixSaved = {};
+  sub.x = DOCK_X; sub.y = DOCK_Y; sub.vx = sub.vy = 0;
+  if (!first) sub.hp = Math.max(sub.hp, Math.ceil(MAX_HP * HULL_FREE_FRACTION));
+  water = 0; engWater = 0; termShorted = false; air = 1;
+  if (fuel > 0) { engine.state = 'running'; engine.report = null; engine.stopIn = 0; }
+  gen.on = true; gen.boot = 0; arm.hits = 0;
+  // Horn charges refilled: one loaded in the horn, the rest topped up in storage (HORN_CHARGES in all)
+  mod('HORN').loaded = 1;
+  for (const c of items) if (c.type === 'CHARGE') { c.gas = 1; c.leak = 0; }
+  for (let n = items.filter(i => i.type === 'CHARGE').length; n < HORN_CHARGES - 1; n++) items.push({ type: 'CHARGE', where: 'storage', gas: 1 });
+  hornWaves = [];
+  creature.x = CREATURE_HOME[0]; creature.y = CREATURE_HOME[1]; creature.vx = creature.vy = 0;
+  // Fresh loot every dive: the bait by the creature, a couple in the trench, most of it in the ruins
+  const pick = (list, n, value) => shuffle(list).slice(0, n).map(([x, y]) => ({ x, y, value, state: 'free' }));
+  relics = [...pick(RELIC_BAIT, 2, RELIC_VALUE), ...pick(RELIC_UPPER, UPPER_RELICS_PER_DIVE, RELIC_VALUE_UPPER),
+            ...pick(RELIC_RUINS, RUIN_RELICS_PER_DIVE, RELIC_VALUE_RUINS)];
+  scraps = shuffle(SCRAP_POOL).slice(0, SCRAP_PER_DIVE).map(([x, y]) => ({ x, y, state: 'free', type: SCRAP_MIX[Math.floor(Math.random() * SCRAP_MIX.length)] }));
+  dots = []; pings = []; echoes = [];
+  log(first ? 'DOCKED. FREE REPAIRS 60s' : `DIVE ${divesDone} DONE. FREE REPAIRS 60s`, 'good');
+}
+function launch() {
+  if (phase !== 'dock') return;
+  phase = 'dive'; sub.vy = 60;
+  log('DIVING', 'good');
+}
+function endDive() {
+  divesDone++;
+  if (divesDone % DIVES_PER_QUOTA === 0) {
+    const pay = Math.min(coins, quota - paid); coins -= pay; paid += pay;
+    if (paid < quota) return fail('QUOTA MISSED');
+    quotasMet++; log(`QUOTA ${quota} MET`, 'good');
+    quota = Math.round(quota * QUOTA_GROWTH / 50) * 50; paid = 0;
+  }
+  startDock(false);
+}
+function payQuota() {
+  const pay = Math.min(coins, quota - paid);
+  if (pay <= 0) return;
+  coins -= pay; paid += pay; log(`PAID ${pay} TOWARD QUOTA`, 'good');
+}
+function buyGas() {
+  if (phase !== 'dock' || coins < GAS_COST) return;
+  if (storedParts() >= MAX_PARTS) return log('STORAGE FULL', 'warn');
+  coins -= GAS_COST; items.push({ type: 'GAS', where: 'storage' }); log('BOUGHT A GAS CANISTER', 'good');
+}
+function buyHull() {
+  if (phase !== 'dock' || coins < HULL_HIT_COST || sub.hp >= MAX_HP) return;
+  coins -= HULL_HIT_COST; sub.hp = Math.min(MAX_HP, sub.hp + HIT_DAMAGE); log(`HULL +${HIT_DAMAGE}`, 'good');
+}
+function fail(reason) {
+  if (sub.dead) return;
+  sub.dead = true; failReason = reason;
+  if (reason !== 'QUOTA MISSED') SFX.implode();
+}
+
+// ===================== POWER + AIR =====================
+// Engine shutdown: report shows right away, engine stops REPORT_LEAD later. Type is fixed now, never re-rolled.
+function engineShutdown(report) {
+  if (engine.state !== 'running' || engine.stopIn > 0) return;
+  engine.report = report; engine.stopIn = REPORT_LEAD;
+  if (report === 'malfunction') engWater = Math.max(engWater, BAY_FLOOD);   // the bay floods behind its sealed door
+  if (report === 'prevention') { log('! ENGINE MALFUNCTION PREVENTION', 'warn'); tone(180, 0.4, 0, 'square', 0.06); }
+  else if (report === 'malfunction') { log('X ENGINE MALFUNCTION', 'bad'); tone(300, 0.12); tone(300, 0.12, 0.18); }
+  else log('FUEL EXHAUSTED', 'bad');
+}
+function updatePower(dt) {
+  if (engine.stopIn > 0 && (engine.stopIn -= dt) <= 0) { engine.stopIn = 0; engine.state = 'off'; }
+  if (gen.boot > 0 && (gen.boot -= dt) <= 0) {
+    gen.boot = 0; sys = { sonar: true, pump: false, lights: true }; // power-on resets the panel switches
+    log('SYSTEMS ONLINE', 'good');
+  }
+  darkT = power() ? 0 : darkT + dt;
+  if (engine.state === 'running' && phase === 'dive') {
+    const bus = gen.on && gen.boot <= 0;
+    fuel -= (FUEL_IDLE + (bus && sys.lights ? FUEL_LIGHTS : 0) + (bus && sys.sonar ? FUEL_SONAR : 0)
+           + (pumpRunning() ? FUEL_PUMP : 0) + Math.hypot(throttle.x, throttle.y) * FUEL_THRUST) * dt;
+    if (fuel <= 0) { fuel = 0; engineShutdown('fuel'); }
+  }
+  // Air: only the air generator module (powered, in any slot) makes air. The crank slows the loss.
+  if (airMaking() || phase === 'dock') air = Math.min(1, air + AIR_REFILL * dt);
+  else air -= dt / SUFFOCATE_TIME * (crankTurning() ? 1 - CRANK_EFFECT : 1);
+  if (air <= 0) { air = 0; fail('SUFFOCATED'); }
+  if (power() && !parts.propeller.broken) propAng += 18 * Math.hypot(throttle.x, throttle.y) * dt + 2 * dt;
+}
+
+// ===================== WATER =====================
+// ----- Water -----
+// Two compartments. Levels are fractions of each room's height; volumes are compared in "cabin units"
+// (the engine room holds ENG_RATIO of what the cabin does). Surfaces stay level with the world (so they slant
+// when the sub tilts) and slosh when the sub speeds up or slows down.
+const CREW_FLOOR = 41, CREW_TOP = -36, ENG_FLOOR = -3, ENG_TOP = -45;
+const ENG_RATIO = (64 * 42) / (115 * 77);
+const crewSurfY = () => CREW_FLOOR - water * (CREW_FLOOR - CREW_TOP);
+const engSurfY = () => ENG_FLOOR - engWater * (ENG_FLOOR - ENG_TOP);
+const waterLineLocal = crewSurfY;
+// Surface height at a given x: level, tilted to stay flat in the world, plus slosh
+const surfaceSlope = () => -Math.tan(visAng()) + slosh.a;
+const crewSurfAt = x => crewSurfY() + surfaceSlope() * (x - 50);
+let doorStream = 0;   // how hard water is pouring through the bay door (for drawing)
+function updateWater(dt) {
+  // Slosh: a damped spring pushed by the sub's horizontal acceleration
+  const ax = (sub.vx - slosh.lastVx) / Math.max(dt, 1e-3); slosh.lastVx = sub.vx;
+  slosh.v += (-SLOSH_K * slosh.a - SLOSH_DAMP * slosh.v - ax * SLOSH_PUSH * SLOSH_K) * dt;
+  slosh.a = clamp(slosh.a + slosh.v * dt, -0.35, 0.35);
+  if (phase === 'dive') {
+    // Damaged hull leaks into the cabin, faster the worse it gets
+    const dmg = 1 - sub.hp / MAX_HP;
+    if (dmg > 1 - HULL_LEAK_FROM) water += HULL_LEAK * (dmg - (1 - HULL_LEAK_FROM)) / HULL_LEAK_FROM * dt;
+    // Dead propeller + open bay = the sea comes in through the shaft, into the engine room
+    if (parts.propeller.broken && hatch.progress > 0.3) engWater += SHAFT_LEAK / ENG_RATIO * dt;
+  }
+  // Flow through the bay door: the doorway's bottom is below the engine room floor, so the engine room drains
+  // into the cabin whenever the door is open; cabin water flows back only once it's above the engine room floor.
+  doorStream = 0;
+  const open = clamp((hatch.progress - 0.15) / 0.6, 0, 1);
+  if (open > 0) {
+    const es = engSurfY(), cs = crewSurfY();
+    if (engWater > 0 && es < cs) {          // engine room -> cabin
+      const dv = Math.min(engWater * ENG_RATIO, DOOR_FLOW * open * (0.3 + (cs - es) / 40) * dt);
+      engWater -= dv / ENG_RATIO; water += dv; doorStream = dv / dt;
+    } else if (cs < ENG_FLOOR && cs < es - 0.5) {   // cabin -> engine room
+      const dv = Math.min(water, DOOR_FLOW * open * (es - cs) / 40 * dt);
+      water -= dv; engWater = Math.min(1, engWater + dv / ENG_RATIO);
+    }
+  }
+  // Pump: clears cabin water, but running dry sparks and then explodes
+  if (pumpRunning()) {
+    if (water > 0) { water = Math.max(0, water - PUMP_RATE * dt); pumpSpark = 0; }
+    else if ((pumpSpark += dt) >= DRY_SPARK_TIME) {
+      parts.pumpMech.dead = true; pumpSpark = 0; air = Math.max(0, air - PUMP_BLAST_AIR);
+      kick(SHAKE_WALL * 2, 0); SFX.boom(); log('PUMP EXPLODED (RAN DRY)', 'bad');
+    }
+  } else pumpSpark = 0;
+  // Water in the electrics: above WATER_SHORT the terminal shorts out until the cabin is (nearly) dry again
+  if (!termShorted && water > WATER_SHORT) { termShorted = true; log('WATER IN THE ELECTRICS - TERMINAL SHORTED', 'bad'); SFX.zap(); }
+  else if (termShorted && water < WATER_DRY) { termShorted = false; log('TERMINAL DRY - BACK ONLINE', 'good'); }
+  // Over your head: can't stay in the chair, and you lose air fast while under
+  const headY = mode === 'seated' ? CHAIR_HEAD_Y : footY(fig.x) - FIG_HEIGHT + 2;
+  const headX = mode === 'seated' ? CHAIR_X - 3 : fig.x;
+  if (crewSurfAt(headX) < headY && phase === 'dive') {
+    if (mode === 'seated') { toggleSeat(); log('WATER OVER YOUR HEAD - CAN\'T SIT', 'bad'); }
+    air -= DROWN_RATE * dt;
+  }
+  water = Math.max(0, water); engWater = clamp(engWater, 0, 1);
+  if (water >= 1) { water = 1; fail('FLOODED'); }
+}
+const CHAIR_HEAD_Y = 2;   // where your head is when seated
+// Can you sit? Not with your hands full, stumbling, away from the chair, or with the seat under water
+const seatUnderWater = () => crewSurfAt(CHAIR_X - 3) < CHAIR_HEAD_Y;
+
+// ===================== DAMAGE =====================
+function kick(amp, bias) { shake = SHAKE_TIME; shakeAmp = Math.max(shakeAmp * (shake / SHAKE_TIME), amp); shakeBias = bias; }
+function stumble(dirX) {
+  if (mode === 'seated') return;
+  grip = null; inv.open = false;
+  fig.stun = STUMBLE_TIME; fig.vx = (dirX || (Math.random() < 0.5 ? -1 : 1)) * STUMBLE_SPEED;
+}
+function damageHull(n) {
+  sub.hp = Math.max(0, sub.hp - n);
+  if (sub.hp === 0) fail('HULL IMPLODED');
+}
+function armHit() {
+  arm.hits++; log('ARM TOOK THE HIT', 'warn');
+  if (arm.hits >= ARM_MAX_HITS) {
+    arm.broken = true; log('ARM BROKEN', 'bad');
+    if (arm.held) { arm.held.state = 'free'; arm.held = null; }
+  }
+}
+// A part on the hull side that hit: 'slotN' = whatever module sits in slot N
+const partRef = id => id.startsWith('slot') ? moduleIn(+id[4]) : parts[id];
+const PART_NAMES = { panel: 'CONTROL PANEL', storage: 'STORAGE', pumpMech: 'PUMP MECHANISM' };
+// One part on the side that hit rolls (not all of them), chance scaling with impact speed.
+// First bad roll = DAMAGED (still works, warning), second = BROKEN.
+function rollParts(side, speed) {
+  const cand = ({
+    bottom: ['pumpMech', 'slot3'],
+    top:    ['storage', 'slot0'],
+    front:  ['panel', 'slot1'],
+    back:   ['slot2'],
+  }[side] || []).filter(id => { const p = partRef(id); return p && !p.broken && !p.dead && p.imm <= 0; });
+  if (!cand.length) return;
+  const id = cand[Math.floor(Math.random() * cand.length)], p = partRef(id);
+  p.imm = PART_IMMUNITY;
+  const f = clamp((speed - HIT_SPEED) / (HARD_HIT_SPEED - HIT_SPEED), 0, 1);
+  const chance = (PART_CHANCE_SOFT + (PART_CHANCE_HARD - PART_CHANCE_SOFT) * f) * (id === 'storage' ? STORAGE_CHANCE_MULT : 1);
+  if (Math.random() >= chance) return;
+  const name = id.startsWith('slot') ? p.id + ' MODULE' : PART_NAMES[id];
+  if (!p.worn) { p.worn = true; log(`${name} DAMAGED - NEXT HIT BREAKS IT`, 'warn'); }
+  else if (id.startsWith('slot')) { p.broken = true; log(`${name} BROKEN`, 'bad'); }
+  else breakPart(id);
+}
+function breakPart(id) {
+  parts[id].broken = true;
+  if (id === 'panel') {
+    // Everything freezes as it is: switches, screens, and the throttle you were holding
+    frozenThrottle = { ...throttle };
+    snapshot = snapshotMonitors();
+    log('CONTROL PANEL FROZEN', 'bad');
+  } else if (id === 'storage') {
+    inv.open = false;
+    const lost = items.filter(i => i.where === 'storage' && i.type !== 'CHARGE');
+    if (lost.length) { const it = lost[Math.floor(Math.random() * lost.length)]; items.splice(items.indexOf(it), 1); log(`STORAGE HIT - LOST A ${ITEM_TYPES[it.type].short}`, 'bad'); }
+    else log('STORAGE BROKEN', 'bad');
+    if (charges()) log('CHARGES LEAKING - GET THEM OUT OF THE STORAGE', 'bad');
+  } else if (id === 'pumpMech') log('PUMP MECHANISM BROKEN', 'bad');
+  else if (id === 'propeller') log('PROPELLER DESTROYED', 'bad');
+}
+// Rock impact: dull thud, small shake
+function rockHit(side, dirX, speed) {
+  kick(SHAKE_WALL, 0); thud(); stumble(dirX); shoveItems(dirX, 40);
+  if (arm.held) { if (sub.hullImm <= 0) { sub.hullImm = HULL_IMMUNITY; armHit(); } return; }
+  if (sub.hullImm <= 0) {
+    sub.hullImm = HULL_IMMUNITY;
+    damageHull(HIT_DAMAGE);
+    if (Math.random() < PREVENTION_CHANCE) engineShutdown('prevention');
+  }
+  rollParts(side, speed);
+}
+// Creature contact: big shake from the engine side. Always breaks the engine; works through propeller -> engine -> panel.
+function creatureHit(dirX) {
+  kick(SHAKE_CREATURE, -1); roar(); stumble(dirX); shoveItems(dirX, 80);
+  engineShutdown('malfunction');
+  const pr = parts.propeller;
+  if (pr.imm <= 0) {
+    pr.imm = PART_IMMUNITY;
+    if (!pr.broken && Math.random() < PROP_BUMP_CHANCE) {
+      pr.bumps++;
+      if (pr.bumps >= PROP_BUMPS) breakPart('propeller'); else log(`PROPELLER DAMAGED ${pr.bumps}/${PROP_BUMPS}`, 'bad');
+    } else if (pr.broken && !parts.panel.broken && Math.random() < 0.5) breakPart('panel');
+  }
+  if (sub.hullImm > 0) return;
+  sub.hullImm = HULL_IMMUNITY;
+  if (arm.held) return armHit();
+  damageHull(CREATURE_DAMAGE);
+}
+
+// ===================== INPUT =====================
+addEventListener('keydown', e => {
+  if (e.code === 'Tab') e.preventDefault();
+  if (title) { if (!e.repeat && ['Space', 'Enter'].includes(e.code)) startGame(); return; }
+  initAudio();
+  if (!e.repeat) {
+    if (e.code === 'KeyM') toggleMute();
+    if (e.code === 'Backquote') showDebug = !showDebug;
+    if (e.code === 'Enter') dismissTip();
+    if (e.code === 'KeyF') toggleSeat();
+    if (e.code === 'KeyE') {
+      const t = !fix && handTarget();
+      if (fix) fixPress(); else if (t && t.can && t.game) startFix(t); else tapE();
+    }
+    if (e.code === 'Escape') { inv.open = false; grip = null; stopFix(null); }
+    if (e.code === 'Space' && mode === 'seated') launch();
+    if (e.code === 'KeyH') buyHull();
+    if (e.code === 'KeyB') buyGas();
+    if (e.code === 'KeyP') payQuota();
+    if (mode === 'seated' && ['Digit1', 'Digit2', 'Digit3'].includes(e.code)) toggleSystem(['sonar', 'pump', 'lights'][+e.code[5] - 1]);
+    if (e.code === 'KeyQ') fireHorn();
+    if (e.code === 'KeyG') toggleGfx();
+    if (e.code === 'KeyR' && sub.dead) reset();
+  }
+  keys[e.code] = true;
+  if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.code] = false; if (e.code === 'KeyE') hold.lock = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = mouse.rdown = false; grip = null; });
+cv.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+cv.addEventListener('mousedown', e => {
+  if (title) { if (e.button === 0) startGame(); return; }
+  initAudio();
+  if (e.button === 2) { mouse.rdown = true; return; }
+  if (e.button !== 0) return;
+  if (fix) return fixPress();
+  if (mode === 'seated') {
+    const b = termButtons.find(b => mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h);
+    if (b) { if (b.id === 'horn') fireHorn(); else toggleSystem(b.id); return; }
+  }
+  // Storage inventory: click a module to take it in your hand, or vent a horn charge for air
+  if (inv.open) {
+    const b = invButtons.find(b => mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h);
+    if (b && b.m) { carry = b.m; carry.carried = true; log(`TOOK ${carry.id}`, 'good'); SFX.clink(); }
+    else if (b && b.type) { const it = items.filter(i => i.where === 'storage' && i.type === b.type).sort((x, y) => (y.gas ?? 1) - (x.gas ?? 1))[0]; it.where = 'hand'; carry = it; log(`TOOK A ${ITEM_TYPES[b.type].short}`, 'good'); SFX.clink(); }
+    inv.open = false; return;
+  }
+  mouse.down = true;
+  if (mode === 'standing' && !sub.dead) {
+    const t = handTarget();
+    if (t && t.grip) grip = { id: t.id, last: null };
+    else if (t && t.click && t.can) clickAction(t);
+  }
+});
+addEventListener('mouseup', e => { if (e.button === 0) { mouse.down = false; grip = null; } if (e.button === 2) mouse.rdown = false; });
+cv.addEventListener('contextmenu', e => e.preventDefault());
+function resize() { cv.width = innerWidth; cv.height = innerHeight; }
+addEventListener('resize', resize);
+
+function toggleSystem(id) {
+  if (!power() || !panelOk()) return; // frozen or dead panel: switches don't move
+  sys[id] = !sys[id];
+  tone(sys[id] ? 800 : 500, 0.05);
+}
+function toggleSeat() {
+  if (sub.dead) return;
+  if (mode === 'seated') {
+    mode = 'standingUp'; standT = 0;
+    Object.assign(fig, { x: 30, vx: 0, face: 1, turn: 0, stun: 0 });
+    hand = { x: 45, y: 10 };
+  } else if (mode === 'standing' && canSit()) { mode = 'seated'; grip = null; inv.open = false; }
+}
+const canSit = () => !carry && fig.stun <= 0 && fig.x >= SIT_RANGE[0] && fig.x <= SIT_RANGE[1] && !seatUnderWater();
+
+// ===================== THE HAND (standing) =====================
+// The mouse steers his hand, like the robot arm but inside. Reach is limited, he can only reach in front of
+// himself (turning takes a moment), and the hand can't go through walls (only through the open bay door).
+const shoulder = () => ({ x: fig.x + fig.face * 1.5, y: footY(fig.x) - FIG_HEIGHT * 0.72 });
+function handValid(p) {
+  if (inPoly(p, CREW_ROOM)) return true;
+  if (hatch.progress <= 0.05) return false;
+  return (inRect(p, DOOR_GAP) && p.y > doorOpenTo()) || inRect(p, ENGINE_ROOM);
+}
+function updateHand(dt) {
+  if (fix) return;   // hand stays on the thing you're repairing
+  const s = shoulder(), m = toLocal(mouseWorld());
+  // Two facings, flips instantly to the mouse's side (small deadzone so he doesn't jitter when it's right above him)
+  if (fig.stun <= 0 && !grip) {
+    if (m.x > s.x + FLIP_DEADZONE) fig.face = 1;
+    else if (m.x < s.x - FLIP_DEADZONE) fig.face = -1;
+  }
+  // Desired hand spot: toward the mouse, within reach, not behind him
+  let dx = m.x - s.x, dy = m.y - s.y;
+  const d = Math.hypot(dx, dy) || 1;
+  if (d > HAND_REACH) { dx *= HAND_REACH / d; dy *= HAND_REACH / d; }
+  if (dx * fig.face < -HAND_BEHIND) dx = -HAND_BEHIND * fig.face;
+  if (fig.stun > 0) { dx = fig.face * 6; dy = 10; }      // arm drops while stumbling
+  // Walk out from the shoulder until something blocks it
+  let tx = s.x, ty = s.y;
+  for (let i = 1; i <= 16; i++) {
+    const p = { x: s.x + dx * i / 16, y: s.y + dy * i / 16 };
+    if (!handValid(p)) break;
+    tx = p.x; ty = p.y;
+  }
+  const k = 1 - Math.exp(-20 * dt);
+  hand.x += (tx - hand.x) * k; hand.y += (ty - hand.y) * k;
+}
+// Which part fixes what. Docked repairs are free and need nothing.
+const PART_FOR = { panel: 'METAL', storage: 'METAL', pumpMech: 'PIPE', PUMP: 'PIPE', AIR: 'FILTER', SONAR: 'METAL', HORN: 'METAL', engine: 'METAL' };
+// Where a floor item sits (sub-local)
+const itemPos = it => ({ x: it.x, y: footY(it.x) - 2 });
+const inStorageArea = h => inPoly(h, STORAGE_POLY) || inRect(h, [46, -36, 59, 14]);
+// What the hand is on. { id, hint, hold (s) / click / grip, can, need (part type used up) }
+function handTarget() {
+  if (mode !== 'standing' || fig.stun > 0 || inv.open) return null;
+  const h = hand, docked = phase === 'dock', item = isItem(carry) ? carry : null;
+  // Repairs: in the dive you need the matching part in your hand; it gets used up
+  const repair = (id, name, need) => {
+    if (docked) return { id, name, hint: `HOLD E: REPAIR ${name} (FREE AT THE DOCK)`, hold: DOCK_REPAIR_TIME, can: true };
+    if (item && item.type === need) return { id, name, need, game: GAME_FOR[need], hint: `E: REPAIR ${name} (USES THE ${ITEM_TYPES[need].short})`, can: true };
+    return { id, hint: `${name} NEEDS A ${ITEM_TYPES[need].short} - TAKE ONE FROM STORAGE`, can: false };
+  };
+  if (carry && !item) {   // holding a module
+    const si = slotAt(h);
+    if (si >= 0) return { id: 'install', slot: si, click: true, can: true,
+      hint: `CLICK: INSTALL ${carry.id} IN ${SLOTS[si].name} SLOT${moduleIn(si) ? ' (SWAPS ' + moduleIn(si).id + ' INTO YOUR HAND)' : ''}` };
+  }
+  if (carry && inStorageArea(h)) {
+    if (parts.storage.broken) return item && item.type === 'METAL' && !docked ? repair('storage', 'STORAGE', 'METAL') : { id: 'store', hint: 'STORAGE BROKEN - PATCH IT WITH A METAL PART', can: false };
+    if (item && item.type !== 'CHARGE' && storedParts() >= MAX_PARTS) return { id: 'store', hint: 'STORAGE FULL', can: false };
+    const r = parts.storage.worn ? repair('storage', 'STORAGE', 'METAL') : null;
+    return { id: 'store', click: true, can: true, hold: r && r.can ? r.hold : 0, need: r && r.need, game: r && r.can ? r.game : null, name: 'STORAGE', hint: (r && r.can ? r.hint + '   ' : '') + `CLICK: PUT THE ${carriedName(carry)} IN STORAGE` };
+  }
+  if (dist(h, WHEEL_POS) < WHEEL_R + 3 && !carry) return { id: 'wheel', hint: 'HOLD LMB + CIRCLE: SPIN THE BAY WHEEL (clockwise opens)', grip: true, can: true };
+  if (dist(h, CRANK_POS) < CRANK_R + 4 && !carry) return { id: 'crank', hint: 'HOLD LMB + CIRCLE: AIR CRANK', grip: true, can: true };
+  if (inRect(h, ENGINE_BOX)) {
+    if (item && item.type === 'GAS') return fuel > 0.99 ? { id: 'refuel', hint: 'TANK FULL', can: false }
+      : { id: 'refuel', hold: POUR_TIME, can: true, hint: `HOLD E: POUR THE GAS IN (+${Math.round(GAS_FUEL * 100)}% FUEL)` };
+    if (engine.state === 'running') return { id: 'engine', hint: 'ENGINE RUNNING', can: false };
+    if (engine.report === 'fuel') return { id: 'engine', hint: 'NO FUEL', can: false };
+    if (engine.report === 'malfunction') {
+      // A malfunction is real damage: it needs a metal part (free at the dock)
+      const r = repair('engine', 'ENGINE', 'METAL');
+      return r.can ? { ...r, rivets: RIVETS + 1, hint: r.hint.replace('REPAIR ENGINE', 'FIX + RESTART ENGINE') } : r;
+    }
+    return { id: 'engine', hint: 'HOLD E: RESTART ENGINE', hold: RESTART_PREVENTION, can: true };
+  }
+  if (dist(h, BREAKER_POS) < 6) return { id: 'breaker', hint: gen.on ? 'HOLD E: CUT POWER' : 'HOLD E: POWER ON', hold: BREAKER_HOLD, can: true };
+  const si = slotAt(h);
+  if (si >= 0) {
+    const m = moduleIn(si);
+    if (!m) return { id: 'slot', hint: `${SLOTS[si].name} SLOT EMPTY`, can: false };
+    const r = m.broken || m.worn ? repair('slot' + si, m.id, PART_FOR[m.id]) : null;
+    if (item && item.type === 'CHARGE' && m.id === 'HORN' && !m.broken)   // reload the horn
+      return m.loaded > 0 ? { id: 'load', hint: 'HORN ALREADY LOADED', can: false } : { id: 'load', hold: RELOAD_TIME, can: true, hint: 'HOLD E: LOAD THE CHARGE INTO THE HORN' };
+    if (carry) return r || { id: 'slot', hint: 'HANDS FULL', can: false };
+    return { id: 'slot' + si, slot: si, click: true, can: true, hold: r && r.can ? r.hold : 0, need: r && r.need, game: r && r.can ? r.game : null, name: m.id,
+      hint: (r ? r.hint + '   ' : '') + `CLICK: TAKE ${m.id} OUT` };
+  }
+  if (!carry && inStorageArea(h)) {
+    // Damaged or broken storage still opens (click: get the leaking charges out!) and can be patched (hold E at the dock)
+    const r = parts.storage.broken || parts.storage.worn ? repair('storage', 'STORAGE', 'METAL') : null;
+    return { id: 'storage', click: true, can: true, hold: r && r.can ? r.hold : 0, hint: (r ? r.hint + '   ' : '') + (storageLeaking() ? 'CLICK: OPEN - GET THE CHARGES OUT!' : 'CLICK: OPEN STORAGE') };
+  }
+  if (inRect(h, PUMP_BOX, 4)) {
+    if (parts.pumpMech.dead) return { id: 'pumpMech', hint: 'PUMP EXPLODED - GONE', can: false };
+    if (parts.pumpMech.broken || parts.pumpMech.worn) return repair('pumpMech', 'PUMP', 'PIPE');
+  }
+  if (inPoly(h, PANEL_POLY) && (parts.panel.broken || parts.panel.worn)) {
+    if (power() || gen.boot > 0) return { id: 'panel', hint: 'PANEL LIVE - CUT POWER (BREAKER IN THE ENGINE BAY)', can: false };
+    return repair('panel', 'PANEL', 'METAL');
+  }
+  // Loose items on the floor: pick one up
+  if (!carry) {
+    const it = items.find(i => i.where === 'floor' && dist(h, [itemPos(i).x, itemPos(i).y]) < 7);
+    if (it) return { id: 'pickup', it, click: true, can: true, hint: `CLICK: PICK UP THE ${ITEM_TYPES[it.type].name}` };
+  }
+  // Holding something with nothing to use it on
+  if (item && item.type === 'CHARGE') return { id: 'vent', hold: 1.0, can: air < 1, click: true, hint: `CHARGE: LOAD IT INTO THE HORN, OR HOLD E: OPEN THE VALVE (+${Math.round(CHARGE_AIR * 100 * (item.gas ?? 1))}% AIR)   CLICK: DROP IT` };
+  if (item) return { id: 'drop', click: true, can: true, hint: `CARRYING A ${ITEM_TYPES[item.type].name} (${{ PIPE: 'FIXES THE PUMP', FILTER: 'FIXES THE AIR GENERATOR', METAL: 'FIXES EVERYTHING ELSE', GAS: 'POUR IT INTO THE ENGINE' }[item.type]})   CLICK: DROP IT` };
+  if (carry) return { id: 'carrying', hint: `CARRYING ${carry.id} - CLICK A RED SLOT OR THE STORAGE`, can: false };
+  return null;
+}
+function holdAction(t) {
+  const id = t.id;
+  // Used-up part leaves the hand
+  if (t.need && phase !== 'dock' && isItem(carry) && carry.type === t.need) { items.splice(items.indexOf(carry), 1); carry = null; }
+  if (id === 'vent') return ventCharge();
+  if (id === 'refuel') {
+    items.splice(items.indexOf(carry), 1); carry = null;
+    fuel = Math.min(1, fuel + GAS_FUEL); SFX.pour();
+    if (engine.state === 'off' && engine.report === 'fuel') engine.report = 'prevention';   // dry engine: just restart it now
+    return log(`REFUELED: ${Math.round(fuel * 100)}%`, 'good');
+  }
+  if (id === 'load') {
+    const h = mod('HORN'); h.loaded = carry.gas ?? 1;
+    items.splice(items.indexOf(carry), 1); carry = null; SFX.clunk();
+    return log('HORN LOADED', 'good');
+  }
+  if (id === 'engine') { engine.state = 'running'; engine.report = null; log('ENGINE RESTARTED', 'good'); SFX.starter(); return; }
+  if (id === 'breaker') { gen.on = !gen.on; if (gen.on) gen.boot = BOOT_TIME; else log('POWER CUT', 'warn'); SFX.breaker(); return; }
+  // Repairs clear both stages (damaged and broken)
+  if (id === 'panel') { parts.panel.broken = parts.panel.worn = false; frozenThrottle = null; snapshot = null; log('PANEL REPAIRED', 'good'); }
+  else if (id === 'pumpMech') { parts.pumpMech.broken = parts.pumpMech.worn = false; log('PUMP REPAIRED', 'good'); }
+  else if (id === 'storage' || id === 'store') { parts.storage.broken = parts.storage.worn = false; log('STORAGE REPAIRED', 'good'); }
+  else if (id.startsWith('slot')) { const m = moduleIn(+id[4]); m.broken = m.worn = false; log(`${m.id} REPAIRED`, 'good'); }
+}
+// Clicks: modules in/out of slots (every hatch cycle traps a bucket of water), storing, picking up, dropping
+function clickAction(t) {
+  const bucket = () => { if (phase === 'dive') water += BUCKET; };
+  if (t.id === 'install') {
+    const other = moduleIn(t.slot);
+    carry.slot = t.slot; carry.carried = false; log(`${carry.id} -> ${SLOTS[t.slot].name} SLOT`, 'good');
+    carry = null; bucket(); SFX.clunk(); if (phase === 'dive') SFX.gush();
+    if (other) { other.slot = -1; other.carried = true; carry = other; }
+  } else if (t.id === 'store') {
+    if (isItem(carry)) { carry.where = 'storage'; log(`${ITEM_TYPES[carry.type].short} STORED`, 'good'); }
+    else { carry.slot = -1; carry.carried = false; log(`${carry.id} STORED`, 'good'); }
+    carry = null; SFX.clunk();
+  }
+  else if (t.id === 'storage') { inv.open = true; mouse.down = false; SFX.squeak(); }
+  else if (t.id === 'pickup') { t.it.where = 'hand'; carry = t.it; SFX.clink(); }
+  else if (t.id === 'drop' || t.id === 'vent') { carry.where = 'floor'; carry.x = clamp(hand.x, WALK_X[0], 100); carry.vx = fig.vx; carry = null; SFX.drop(); }
+  else if (t.id.startsWith('slot')) {
+    const m = moduleIn(t.slot);
+    m.slot = -1; m.carried = true; carry = m; bucket(); SFX.clunk(); if (phase === 'dive') SFX.gush(); log(`TOOK ${m.id} OUT`, 'warn');
+  }
+}
+// E while the storage window is open closes it
+function tapE() {
+  if (inv.open) { inv.open = false; hold.lock = true; }
+}
+function updateHold(dt) {
+  const t = keys.KeyE && !hold.lock ? handTarget() : null;
+  if (!t || !t.can || !t.hold) { hold.id = null; hold.t = 0; return; }
+  if (hold.id !== t.id) { hold.id = t.id; hold.t = 0; }
+  if ((hold.t += dt) >= t.hold) { holdAction(t); hold.id = null; hold.t = 0; hold.lock = true; }
+}
+// ----- Repair minigames (mid-dive; docked repairs stay a quick hold) -----
+// METAL: hammer the rivets in time. PIPE: screw the compression fitting tight. FILTER: line the cartridge up and push.
+// Getting knocked down, walking off or pressing ESC stops it; progress is kept until you finish (or dock).
+const GAME_FOR = { METAL: 'rivet', PIPE: 'screw', FILTER: 'filter' };
+let fix = null, fixSaved = {};
+function startFix(t) {
+  const saved = fixSaved[t.id];
+  fix = { id: t.id, name: t.name, game: t.game, total: t.rivets || RIVETS, prog: saved && saved.game === t.game ? saved.prog : 0,
+          pos: 0, dir: 1, zone: 0.25 + Math.random() * 0.5, flash: 0, miss: 0, lastA: null, tick: 0, guide: 0.5, fx: 0.5, on: false, push: false };
+  hold.lock = true; grip = null;
+}
+function stopFix(why) {
+  if (!fix) return;
+  fixSaved[fix.id] = { game: fix.game, prog: fix.prog };
+  if (why) log(`REPAIR STOPPED (${why}) - PROGRESS KEPT`, 'warn');
+  fix = null;
+}
+function finishFix() {
+  const id = fix.id;
+  delete fixSaved[id]; fix = null;
+  const t = handTarget();
+  if (t && t.id === id && t.game) { holdAction(t); SFX.fixed(); }
+}
+// Rivets: E or a click when the marker is in the green
+function fixPress() {
+  if (!fix || fix.game !== 'rivet') return;
+  if (Math.abs(fix.pos - fix.zone) < RIVET_ZONE / 2) {
+    fix.prog++; fix.flash = 0.25; SFX.hammer(); kick(2, 0);
+    fix.zone = 0.15 + Math.random() * 0.7;
+    if (fix.prog >= fix.total) finishFix();
+  } else { fix.miss = 0.3; SFX.miss(); }
+}
+function updateFix(dt) {
+  if (!fix) return;
+  if (sub.dead || mode !== 'standing') return stopFix(null);
+  if (fig.stun > 0) return stopFix('KNOCKED OFF');
+  if (keys.KeyA || keys.KeyD || keys.ArrowLeft || keys.ArrowRight) return stopFix(null);
+  const t = handTarget();
+  if (!t || t.id !== fix.id || t.game !== fix.game) return stopFix(null);
+  fix.flash = Math.max(0, fix.flash - dt); fix.miss = Math.max(0, fix.miss - dt);
+  const L = fixLayout();
+  if (fix.game === 'rivet') {
+    fix.pos += fix.dir * RIVET_SPEED * (1 + fix.prog * 0.2) * dt;
+    if (fix.pos > 1) { fix.pos = 2 - fix.pos; fix.dir = -1; } else if (fix.pos < 0) { fix.pos = -fix.pos; fix.dir = 1; }
+  } else if (fix.game === 'screw') {
+    // Circle the mouse clockwise around the nut; counter-clockwise backs it off
+    const dx = mouse.x - L.nx, dy = mouse.y - L.ny;
+    if (Math.hypot(dx, dy) > 14) {
+      const a = Math.atan2(dy, dx);
+      if (fix.lastA !== null) {
+        const d = Math.atan2(Math.sin(a - fix.lastA), Math.cos(a - fix.lastA)), before = Math.floor(fix.prog * SCREW_TURNS * 12);
+        fix.prog = clamp(fix.prog + d / (Math.PI * 2 * SCREW_TURNS), 0, 1);
+        if (Math.floor(fix.prog * SCREW_TURNS * 12) !== before) SFX.ratchet();
+      }
+      fix.lastA = a;
+    } else fix.lastA = null;
+    if (fix.prog >= 1) finishFix();
+  } else {
+    // The slot's guide drifts about; keep the cartridge (mouse x) under it and hold E to push it in
+    fix.guide = 0.5 + 0.32 * Math.sin(time * 1.2 + Math.sin(time * 0.7) * 2);
+    fix.fx = clamp((mouse.x - L.tx) / L.tw, 0, 1);
+    fix.push = !!keys.KeyE; fix.on = Math.abs(fix.fx - fix.guide) < FILTER_SLACK;
+    if (fix.push && fix.on) { fix.prog += dt / FILTER_TIME; if ((fix.tick -= dt) <= 0) { SFX.slide(); fix.tick = 0.12; } }
+    else if (fix.push) { fix.prog = Math.max(0, fix.prog - dt * 0.3); fix.miss = 0.15; if ((fix.tick -= dt) <= 0) { SFX.scrape(); fix.tick = 0.15; } }
+    if (fix.prog >= 1) finishFix();
+  }
+}
+const fixLayout = () => {
+  const W = cv.width, H = cv.height, w = Math.min(380, W - 32), h = 170, x = (W - w) / 2, y = Math.min(H - h - 16, H * 0.6);
+  return { x, y, w, h, tx: x + 30, tw: w - 60, nx: W / 2, ny: y + 92 };
+};
+// Loose items on the floor slide with the sub's tilt and get thrown about by hits
+function updateItems(dt) {
+  for (const it of items) {
+    if (it.where !== 'floor') continue;
+    it.vx += Math.sin(visAng()) * ITEM_SLIDE * dt;
+    it.vx *= Math.exp(-3 * dt);
+    it.x += it.vx * dt;
+    if (it.x < WALK_X[0] || it.x > 100) { it.x = clamp(it.x, WALK_X[0], 100); it.vx *= -0.3; }
+  }
+}
+function shoveItems(dirX, amount) { for (const it of items) if (it.where === 'floor') it.vx += (dirX || (Math.random() - 0.5) * 2) * amount * (0.6 + Math.random() * 0.8); }
+// Gripping the wheel or crank: circle the mouse around it
+function updateGrip() {
+  if (!grip) return;
+  const c = grip.id === 'wheel' ? WHEEL_POS : CRANK_POS, r = grip.id === 'wheel' ? WHEEL_R : CRANK_R;
+  if (!mouse.down || dist(hand, c) > r + 10 || fig.stun > 0) { grip = null; return; }
+  const a = Math.atan2(hand.y - c[1], hand.x - c[0]);
+  if (grip.last !== null && dist(hand, c) > 2) {
+    const d = Math.atan2(Math.sin(a - grip.last), Math.cos(a - grip.last));
+    if (grip.id === 'wheel') {
+      const before = Math.floor(hatch.progress * HATCH_TURNS * 16);
+      hatch.progress = clamp(hatch.progress + d / (Math.PI * 2 * HATCH_TURNS), 0, 1);
+      if (Math.floor(hatch.progress * HATCH_TURNS * 16) !== before) SFX.ratchet();
+    } else if (Math.abs(d) > 0.01) {
+      if (Math.floor((crank.ang + d) / 1.6) !== Math.floor(crank.ang / 1.6)) SFX.squeak();
+      crank.ang += d; crank.lastT = time;
+    }
+  }
+  grip.last = a;
+}
+
+// ===================== FIGURE =====================
+function updateFigure(dt) {
+  if (mode === 'standingUp' && (standT += dt) >= STAND_UP_TIME) mode = 'standing';
+  if (mode !== 'standing' || sub.dead) return;
+  updateHand(dt);
+  updateGrip();
+  const h = inv.open || grip ? 0 : (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  const wade = waterLineLocal() < footY(fig.x) - 15 ? 0.55 : 1;   // water above the knees slows you
+  if (fig.stun > 0) { fig.stun -= dt; fig.vx *= Math.exp(-4 * dt); }
+  else {
+    const tv = h * WALK_SPEED * wade;
+    fig.vx += clamp(tv - fig.vx, -WALK_ACCEL * dt, WALK_ACCEL * dt);
+  }
+  const stepBefore = Math.floor(fig.walk * 10 / Math.PI);
+  fig.x += fig.vx * dt; fig.walk += Math.abs(fig.vx) / WALK_SPEED * dt;
+  if (Math.floor(fig.walk * 10 / Math.PI) !== stepBefore && Math.abs(fig.vx) > 8) SFX.step(water > 0.02 && waterLineLocal() < footY(fig.x) - 1);
+  if (fig.x < WALK_X[0] || fig.x > WALK_X[1]) fig.vx = 0;
+  fig.x = clamp(fig.x, WALK_X[0], WALK_X[1]);
+}
+
+// ===================== PHYSICS =====================
+// ----- Collision against the level's polygons -----
+// Do segments ab and cd cross?
+function segCross(ax, ay, bx, by, cx, cy, dx, dy) {
+  const o = (px, py, qx, qy, rx, ry) => (qx - px) * (ry - py) - (qy - py) * (rx - px);
+  const d1 = o(cx, cy, dx, dy, ax, ay), d2 = o(cx, cy, dx, dy, bx, by), d3 = o(ax, ay, bx, by, cx, cy), d4 = o(ax, ay, bx, by, dx, dy);
+  return d1 * d2 < 0 && d3 * d4 < 0;
+}
+// Does box b overlap solid polygon s? (vertex inside box, box corner inside polygon, or edges crossing)
+function boxHitsSolid(b, s) {
+  if (b.x + b.w < s.x0 || b.x > s.x1 || b.y + b.h < s.y0 || b.y > s.y1) return false;
+  const bx1 = b.x + b.w, by1 = b.y + b.h;
+  for (const [x, y] of s.pts) if (x > b.x && x < bx1 && y > b.y && y < by1) return true;
+  for (const [x, y] of [[b.x, b.y], [bx1, b.y], [bx1, by1], [b.x, by1]]) if (inPoly({ x, y }, s.pts)) return true;
+  for (const g of s.segs) {
+    if (Math.max(g.ax, g.bx) < b.x || Math.min(g.ax, g.bx) > bx1 || Math.max(g.ay, g.by) < b.y || Math.min(g.ay, g.by) > by1) continue;
+    if (segCross(g.ax, g.ay, g.bx, g.by, b.x, b.y, bx1, b.y) || segCross(g.ax, g.ay, g.bx, g.by, bx1, b.y, bx1, by1) ||
+        segCross(g.ax, g.ay, g.bx, g.by, bx1, by1, b.x, by1) || segCross(g.ax, g.ay, g.bx, g.by, b.x, by1, b.x, b.y)) return true;
+  }
+  return false;
+}
+const subHitsSolid = () => subBoxes().some(b => SOLIDS.some(s => boxHitsSolid(b, s)));
+// If the hull ever ends up inside rock, pop it out to the nearest free spot (searching outward in rings)
+function unstick() {
+  if (!subHitsSolid()) return;
+  const x0 = sub.x, y0 = sub.y;
+  for (let r = 4; r <= 160; r += 4) for (let i = 0; i < 16; i++) {
+    const a = i / 16 * Math.PI * 2;
+    sub.x = x0 + Math.cos(a) * r; sub.y = y0 + Math.sin(a) * r;
+    if (!subHitsSolid()) { sub.vx = sub.vy = 0; return; }
+  }
+  sub.x = x0; sub.y = y0;
+}
+// Move along one axis. If that would put the hull into rock, binary-search back to the contact point,
+// then bounce and (if fast enough) take the hit.
+function moveAxis(axis, delta) {
+  if (!delta) return;
+  const v = axis === 'x' ? 'vx' : 'vy', start = sub[axis];
+  sub[axis] = start + delta;
+  if (!subHitsSolid()) return;
+  sub[axis] = start;
+  if (subHitsSolid()) { unstick(); return; }   // already wedged: pop out instead of phasing through
+  let lo = 0, hi = 1;
+  for (let i = 0; i < 8; i++) { const m = (lo + hi) / 2; sub[axis] = start + delta * m; if (subHitsSolid()) hi = m; else lo = m; }
+  sub[axis] = start + delta * lo;
+  const speed = Math.abs(sub[v]), dir = Math.sign(sub[v]);
+  sub[v] = -sub[v] * BOUNCE;
+  sub.angV += (Math.random() - 0.5) * speed * 0.03;
+  // Direction decides what breaks: diving lands on the bottom, sideways hits nose or back, climbing scrapes the top
+  const side = axis === 'x' ? (dir > 0 ? 'front' : 'back') : (dir > 0 ? 'bottom' : 'top');
+  if (speed > HIT_SPEED) rockHit(side, axis === 'x' ? dir : 0, speed);
+}
+function touchCreature() {
+  const cr = CREATURE_SIZE / 2;
+  const touching = subBoxes().some(b => {
+    const px = Math.max(b.x, Math.min(creature.x, b.x + b.w)), py = Math.max(b.y, Math.min(creature.y, b.y + b.h));
+    return Math.hypot(px - creature.x, py - creature.y) < cr;
+  });
+  if (!touching) return;
+  let dx = sub.x - creature.x, dy = sub.y - creature.y;
+  const d = Math.hypot(dx, dy);
+  if (d === 0) { dx = 0; dy = -1; } else { dx /= d; dy /= d; }
+  sub.vx = dx * CREATURE_KNOCKBACK; sub.vy = dy * CREATURE_KNOCKBACK;
+  sub.angV += (Math.random() - 0.5) * 8;
+  creatureHit(-Math.sign(dx));
+}
+function updateSub(dt) {
+  let tx = 0, ty = 0;
+  if (!sub.dead && phase === 'dive') {
+    if (parts.panel.broken && frozenThrottle) { tx = frozenThrottle.x; ty = frozenThrottle.y; }
+    else if (mode === 'seated' && panelOk()) {
+      tx = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+      ty = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
+      const l = Math.hypot(tx, ty) || 1; tx /= l; ty /= l;
+    }
+  }
+  if (!power() || parts.propeller.broken) { tx = 0; ty = 0; }
+  if (water > ASCEND_LOCK) ty = Math.max(0, ty);
+  const k = Math.min(1, dt / (SPOOL_TIME * mass()));
+  throttle.x += (tx - throttle.x) * k; throttle.y += (ty - throttle.y) * k;
+
+  if (phase === 'dock') { sub.x = DOCK_X; sub.y = DOCK_Y; sub.vx = sub.vy = 0; }
+  else {
+    sub.vx += throttle.x * THRUST / mass() * dt;
+    sub.vy += (throttle.y * THRUST / mass() + (BASE_SINK + sparesAboard() * PART_SINK) * DRAG) * dt;
+    const d = Math.exp(-DRAG * dt);
+    sub.vx *= d; sub.vy *= d;
+    moveAxis('x', sub.vx * dt);
+    moveAxis('y', sub.vy * dt);
+    touchCreature();
+    maxDepth = Math.max(maxDepth, sub.y);
+    if (sub.y < DIVE_RETURN_Y && maxDepth > DIVE_MIN_DEPTH && !sub.dead) endDive();
+  }
+  const target = sub.vx * TILT_PER_SPEED;
+  sub.angV += (target - sub.ang) * ROT_STIFFNESS / mass() * dt;
+  sub.angV *= Math.exp(-ROT_DAMPING * dt);
+  sub.ang += sub.angV * dt;
+}
+
+// ===================== ROBOT ARM + LOOT =====================
+// The arm's base runs along the rail under the hull. Hold E while seated: it runs to the rail spot
+// closest to where you aim on the sonar, then reaches.
+const armBase = () => subPoint(railPoint(arm.u));
+function updateArm(dt) {
+  let base = armBase();
+  if (arm.held) {
+    const h = arm.held;
+    arm.tipX = h.x; arm.tipY = h.y; arm.ox = h.x - base.x; arm.oy = h.y - base.y;
+    if (Math.hypot(arm.ox, arm.oy) > ARM_REACH || !armWorks() || mode !== 'seated') {
+      h.state = 'free'; arm.held = null;
+    } else if ((arm.tie += dt) >= (h.scrap ? SCRAP_GRAB_TIME : TIE_TIME)) {
+      if (h.scrap) {
+        // Comes in through the floor hatch and lands on the cabin floor: someone has to stow it
+        h.state = 'gone';
+        items.push({ type: h.type, where: 'floor', x: 25 + Math.random() * 35, vx: (Math.random() - 0.5) * 40 });
+        log(`${ITEM_TYPES[h.type].name} ON THE FLOOR`, 'good');
+      } else { h.state = 'rising'; SFX.inflate(); }
+      arm.held = null;
+    }
+    return updateBalloons(dt);
+  }
+  if (mode === 'seated' && keys.KeyE && armWorks() && !sub.dead && phase === 'dive') {
+    const m = sonarMouseWorld(), want = railClosest(toLocal(m));
+    arm.u += clamp(want - arm.u, -ARM_SLIDE_SPEED * dt, ARM_SLIDE_SPEED * dt);
+    base = armBase();
+    const dx = m.x - base.x, dy = m.y - base.y, d = Math.hypot(dx, dy) || 1, reach = Math.min(d, ARM_REACH);
+    const k = 1 - Math.exp(-12 * dt);
+    arm.ox += (dx / d * reach - arm.ox) * k; arm.oy += (dy / d * reach - arm.oy) * k;
+    arm.tipX = base.x + arm.ox; arm.tipY = base.y + arm.oy;
+    const hit = (o, s) => o.state === 'free' && Math.abs(o.x - arm.tipX) < s / 2 + CLAW_RADIUS && Math.abs(o.y - arm.tipY) < s / 2 + CLAW_RADIUS;
+    const r = relics.find(o => hit(o, RELIC_SIZE)) || scraps.find(o => hit(o, SCRAP_SIZE));
+    if (r) { r.state = 'tying'; r.scrap = scraps.includes(r); arm.held = r; arm.tie = 0; }
+  } else if (!power() || arm.broken) {
+    const k = 1 - Math.exp(-3 * dt);
+    arm.ox += (Math.sin(time * 2.3) * 10 - sub.vx * 0.05 - arm.ox) * k;
+    arm.oy += (ARM_REACH * 0.6 - arm.oy) * k;
+  }
+  arm.tipX = base.x + arm.ox; arm.tipY = base.y + arm.oy;
+  updateBalloons(dt);
+}
+// ===================== SHOCKWAVE HORN =====================
+// Fired from the chair (Q or the terminal button). Needs the horn module in a slot and a working panel,
+// but no power: it runs on compressed air charges. The blast goes out of whichever side the horn is mounted,
+// shoves any creature it catches away, and kicks the sub the other way.
+const slotFacing = i => Math.atan2(SLOTS[i].face[1], SLOTS[i].face[0]) + visAng();
+function fireHorn() {
+  const h = mod('HORN');
+  if (sub.dead || mode !== 'seated' || !panelOk() || phase !== 'dive') return;
+  if (h.slot < 0 || h.carried) return log('NO HORN MODULE INSTALLED', 'warn');
+  if (h.broken) return log('HORN MODULE BROKEN', 'bad');
+  if (h.loaded <= 0) { SFX.dry(); return log(`HORN EMPTY - RELOAD IT (${charges()} CHARGES IN STORAGE)`, 'bad'); }
+  // Fires the loaded charge; a half-leaked one gives a weaker blast. Then someone has to reload it by hand.
+  const power = Math.max(0.3, h.loaded); h.loaded = 0;
+  const o = subPoint(SLOTS[h.slot].c), a = slotFacing(h.slot);
+  // Did the cone catch the creature? It gets shoved when the wave reaches it.
+  const dx = creature.x - o.x, dy = creature.y - o.y, d = Math.hypot(dx, dy) || 1;
+  const off = Math.abs(Math.atan2(Math.sin(Math.atan2(dy, dx) - a), Math.cos(Math.atan2(dy, dx) - a)));
+  const hit = d < HORN_RANGE + CREATURE_SIZE / 2 && off < HORN_ARC ? { dx: dx / d, dy: dy / d, d: Math.max(0, d - CREATURE_SIZE / 2), power } : null;
+  hornWaves.push({ x: o.x, y: o.y, a, t: time, hit });
+  sub.vx -= Math.cos(a) * HORN_RECOIL; sub.vy -= Math.sin(a) * HORN_RECOIL;
+  kick(SHAKE_WALL, 0); SFX.horn();
+  log(`HORN FIRED - RELOAD IT (${charges()} CHARGES IN STORAGE)`, 'warn');
+}
+function updateHorn(dt) {
+  for (const w of hornWaves) {
+    if (w.hit && (time - w.t) * HORN_SPEED >= w.hit.d) { creature.vx += w.hit.dx * HORN_PUSH * w.hit.power; creature.vy += w.hit.dy * HORN_PUSH * w.hit.power; w.hit = null; }
+  }
+  hornWaves = hornWaves.filter(w => (time - w.t) * HORN_SPEED < HORN_RANGE);
+  // Shoved creature slides to a stop, then creeps back home
+  const px = creature.x, py = creature.y;
+  creature.x += creature.vx * dt; creature.y += creature.vy * dt;
+  const d = Math.exp(-2 * dt); creature.vx *= d; creature.vy *= d;
+  if (Math.hypot(creature.vx, creature.vy) < 15) {
+    const hx = CREATURE_HOME[0] - creature.x, hy = CREATURE_HOME[1] - creature.y, hd = Math.hypot(hx, hy);
+    if (hd > 1) { const s = Math.min(hd, CREATURE_RETURN * dt); creature.x += hx / hd * s; creature.y += hy / hd * s; }
+  }
+  if (solidAt(creature.x, creature.y)) { creature.x = px; creature.y = py; creature.vx = creature.vy = 0; } // shoved into rock: stops
+}
+// Draw shockwaves as expanding orange arcs (S = world -> drawing coords, k = scale)
+function drawHornWaves(S, k) {
+  ctx.strokeStyle = '#fa4'; ctx.lineWidth = 3 * Math.max(k, 0.5);
+  for (const w of hornWaves) {
+    const r = (time - w.t) * HORN_SPEED, [x, y] = S(w.x, w.y);
+    ctx.globalAlpha = 1 - r / HORN_RANGE;
+    ctx.beginPath(); ctx.arc(x, y, r * k, w.a - HORN_ARC, w.a + HORN_ARC); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+// Open a carried charge's valve: it's compressed air, so it's emergency air (the charge is used up)
+function ventCharge() {
+  const gas = carry.gas ?? 1;
+  items.splice(items.indexOf(carry), 1); carry = null;
+  air = Math.min(1, air + CHARGE_AIR * gas);
+  SFX.vent(); log(`VENTED A CHARGE: +${Math.round(CHARGE_AIR * gas * 100)}% AIR`, 'good');
+}
+
+// Broken storage: the charge rack is cracked and every charge still in it bleeds out in 5 to 8 s (into the cabin air).
+// Carry them out to save them; a charge outside the storage stops leaking.
+function updateCharges(dt) {
+  if (!storageLeaking()) return;
+  for (const c of storedCharges()) {
+    c.leak = c.leak || CHARGE_LEAK[0] + Math.random() * (CHARGE_LEAK[1] - CHARGE_LEAK[0]);
+    const d = Math.min(c.gas, dt / c.leak);
+    c.gas -= d; air = Math.min(1, air + CHARGE_AIR * d);
+    if (c.gas <= 0.001) { items.splice(items.indexOf(c), 1); log(`A CHARGE LEAKED EMPTY (${charges()} LEFT IN STORAGE)`, 'bad'); }
+  }
+}
+function updateBalloons(dt) {
+  for (const r of relics) {
+    if (r.state !== 'rising') continue;
+    r.y -= BALLOON_SPEED * dt;
+    if (r.y < -50) { r.state = 'gone'; coins += r.value; log(`RELIC SOLD +${r.value}`, 'good'); SFX.sold(); }
+  }
+}
+
+// ===================== SONAR =====================
+function rayRect(ox, oy, dx, dy, r) {
+  let tmin = 0, tmax = MURK_RADIUS;
+  for (const [o, dd, lo, hi] of [[ox, dx, r.x, r.x + r.w], [oy, dy, r.y, r.y + r.h]]) {
+    if (Math.abs(dd) < 1e-9) { if (o < lo || o > hi) return Infinity; continue; }
+    let t1 = (lo - o) / dd, t2 = (hi - o) / dd;
+    if (t1 > t2) [t1, t2] = [t2, t1];
+    tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
+    if (tmin > tmax) return Infinity;
+  }
+  return tmin;
+}
+// Ray vs one polygon edge. Returns distance along the ray or Infinity.
+function raySeg(ox, oy, dx, dy, g) {
+  const ex = g.bx - g.ax, ey = g.by - g.ay, den = dx * ey - dy * ex;
+  if (Math.abs(den) < 1e-9) return Infinity;
+  const fx = g.ax - ox, fy = g.ay - oy, t = (fx * ey - fy * ex) / den, u = (fx * dy - fy * dx) / den;
+  return t >= 0 && u >= 0 && u <= 1 ? t : Infinity;
+}
+function rayCreature(ox, oy, dx, dy) {
+  const fx = ox - creature.x, fy = oy - creature.y, r = CREATURE_SIZE / 2;
+  const b = fx * dx + fy * dy, c = fx * fx + fy * fy - r * r, disc = b * b - c;
+  if (disc < 0) return Infinity;
+  const t = -b - Math.sqrt(disc);
+  return t >= 0 ? t : Infinity;
+}
+function castRay(o, ang) {
+  const dx = Math.cos(ang), dy = Math.sin(ang);
+  // Level: nearest polygon edge (the edge's own direction is the surface tangent)
+  let best = Infinity, kind = 'rock', seg = null;
+  for (const s of SOLIDS) {
+    if (o.x < s.x0 - MURK_RADIUS || o.x > s.x1 + MURK_RADIUS || o.y < s.y0 - MURK_RADIUS || o.y > s.y1 + MURK_RADIUS) continue;
+    for (const g of s.segs) { const t = raySeg(o.x, o.y, dx, dy, g); if (t < best) { best = t; seg = g; kind = s.kind; } }
+  }
+  const tc = rayCreature(o.x, o.y, dx, dy);
+  if (tc < best) { best = tc; kind = 'creature'; }
+  const boxes = (list, s, k) => {
+    for (const r of list) {
+      if (r.state === 'gone') continue;
+      const t = rayRect(o.x, o.y, dx, dy, { x: r.x - s / 2, y: r.y - s / 2, w: s, h: s });
+      if (t < best) { best = t; kind = k; }
+    }
+  };
+  boxes(relics, RELIC_SIZE, 'relic'); boxes(scraps, SCRAP_SIZE, 'scrap');
+  // Surface direction at the hit (tangent), so the sonar's error smears along the wall, not into it
+  let tx = -dy, ty = dx;
+  if (best <= MURK_RADIUS) {
+    const px = o.x + dx * best, py = o.y + dy * best;
+    if ((kind === 'rock' || kind === 'ruin') && seg) { tx = seg.tx; ty = seg.ty; }
+    else if (kind === 'creature') {
+      const nx = px - creature.x, ny = py - creature.y, l = Math.hypot(nx, ny) || 1; tx = -ny / l; ty = nx / l;
+    }
+  }
+  return { dist: Math.min(best, MURK_RADIUS), hit: best <= MURK_RADIUS, kind, dx, dy, tx, ty };
+}
+// The sonar can only aim inside its slot's arc: where you mount it decides what you can see
+function sonarAim() {
+  const s = mod('SONAR'), slot = SLOTS[s.slot], o = subPoint(slot.c), m = sonarMouseWorld();
+  const faceA = Math.atan2(slot.face[1], slot.face[0]) + visAng();
+  const want = Math.atan2(m.y - o.y, m.x - o.x);
+  const rel = clamp(Math.atan2(Math.sin(want - faceA), Math.cos(want - faceA)), -SONAR_PORT_ARC, SONAR_PORT_ARC);
+  return { o, aim: faceA + rel, faceA };
+}
+function firePing() {
+  const { o, aim } = sonarAim();
+  fuel -= FUEL_PING;
+  const rays = [], stepA = PING_SPREAD / (PING_RAYS - 1);
+  const jitter = (Math.random() - 0.5) * stepA;
+  for (let i = 0; i < PING_RAYS; i++) {
+    const r = castRay(o, aim - PING_SPREAD / 2 + stepA * i + jitter);
+    rays.push({ ...r, echoed: !r.hit });
+  }
+  const noise = [];
+  for (let i = 0; i < SONAR_NOISE; i++) {
+    const a = aim + (Math.random() - 0.5) * PING_SPREAD;
+    noise.push({ dx: Math.cos(a), dy: Math.sin(a), dist: Math.random() * MURK_RADIUS, echoed: false, kind: 'rock', noise: true });
+  }
+  pings.push({ x: o.x, y: o.y, t: time, rays, noise });
+  SFX.ping();
+}
+// All-around ping from the middle of the hull: a full ring, coarse and crude
+function fireOmni() {
+  const o = subPoint([0, 0]);
+  fuel -= FUEL_PING_OMNI;
+  const rays = [], step = Math.PI * 2 / OMNI_RAYS, jitter = Math.random() * step;
+  for (let i = 0; i < OMNI_RAYS; i++) { const r = castRay(o, i * step + jitter); rays.push({ ...r, echoed: !r.hit }); }
+  const noise = [];
+  for (let i = 0; i < OMNI_NOISE; i++) {
+    const a = Math.random() * Math.PI * 2;
+    noise.push({ dx: Math.cos(a), dy: Math.sin(a), dist: Math.random() * MURK_RADIUS, echoed: false, kind: 'rock', noise: true });
+  }
+  pings.push({ x: o.x, y: o.y, t: time, rays, noise, omni: true });
+  SFX.omni();
+}
+// Bad hardware smears each return ALONG the surface it hit (big error) and barely into it (tiny error),
+// so walls read as a thin, wobbly outline instead of a filled band.
+function spawnEcho(p, r) {
+  const f = r.dist / MURK_RADIUS, om = p.omni;
+  if (Math.random() < (om ? OMNI_DROPOUT : SONAR_DROPOUT) * f) return;
+  // Up close, neighbouring rays land almost on top of each other: thin them so near walls stay blobby, not solid
+  // (the all-around ping's rays are already far apart, so it skips this)
+  if (!om && (r.kind === 'rock' || r.kind === 'ruin') && Math.random() > r.dist / SONAR_NEAR_THIN) return;
+  const along = (Math.random() - 0.5) * 2 * r.dist * (om ? OMNI_JITTER : SONAR_JITTER);
+  const depth = (Math.random() - 0.5) * 2 * r.dist * (om ? OMNI_DEPTH_JITTER : SONAR_DEPTH_JITTER);
+  const tx = r.tx ?? -r.dy, ty = r.ty ?? r.dx;
+  const hx = p.x + r.dx * (r.dist + depth) + tx * along;
+  const hy = p.y + r.dy * (r.dist + depth) + ty * along;
+  echoes.push({ x: hx, y: hy, hx, hy, kind: r.kind, omni: om, noise: r.noise, bright: (1 - SONAR_DIST_FADE * f) * (om ? OMNI_BRIGHT : 1) });
+}
+function updateSonar(dt) {
+  pingTimer -= dt;
+  omniTimer -= dt;
+  const seatedDiving = !sub.dead && mode === 'seated' && phase === 'dive';
+  if (mouse.down && seatedDiving && sonarWorks() && pingTimer <= 0) { firePing(); pingTimer = PING_COOLDOWN; }
+  if (mouse.rdown && seatedDiving && omniWorks() && omniTimer <= 0) { fireOmni(); omniTimer = OMNI_COOLDOWN; }
+  for (const p of pings) {
+    const rad = (time - p.t) * SOUND_SPEED;
+    for (const r of p.rays.concat(p.noise)) if (!r.echoed && rad >= r.dist) { r.echoed = true; spawnEcho(p, r); }
+  }
+  pings = pings.filter(p => (time - p.t) * SOUND_SPEED < MURK_RADIUS);
+  const s = mod('SONAR'), em = subPoint(s.slot >= 0 ? SLOTS[s.slot].c : [0, 0]), mid = subPoint([0, 0]);
+  for (const e of echoes) {
+    const home = e.omni ? mid : em;
+    const dx = home.x - e.x, dy = home.y - e.y, d = Math.hypot(dx, dy), step = SOUND_SPEED * dt;
+    if (d <= Math.max(step, 12)) {
+      e.done = true;
+      if (e.kind === 'relic') showTip('loot'); else if (e.kind === 'creature') showTip('creature');
+      if (!e.noise && e.kind === 'creature' && amb.beast <= 0) { SFX.retBeast(); amb.beast = 1.5; }
+      else if (!e.noise && amb.ret <= 0) { SFX.ret(e.bright); amb.ret = 0.09 + Math.random() * 0.08; }
+      dots.push({ x: e.hx, y: e.hy, t: time, kind: e.kind, noise: e.noise, bright: e.bright, size: (0.7 + Math.random() * 0.6) * (e.omni ? OMNI_BLOB : 1),
+                  fade: e.kind === 'creature' ? CREATURE_DOT_FADE : DOT_FADE_TIME });
+    } else { e.x += dx / d * step; e.y += dy / d * step; }
+  }
+  echoes = echoes.filter(e => !e.done);
+  dots = dots.filter(p => time - p.t < p.fade);
+  if (dots.length > MAX_DOTS) dots.splice(0, dots.length - MAX_DOTS);
+}
+
+// ===================== UPDATE =====================
+function update(dt) {
+  time += dt;
+  if (sub.dead) { updateSub(dt); return; }
+  runTime += dt;
+  sub.hullImm -= dt;
+  for (const k in parts) parts[k].imm -= dt;
+  for (const m of modules) m.imm -= dt;
+  if (phase === 'dock' && (dockT -= dt) <= 0) launch();
+  updatePower(dt);
+  updateWater(dt);
+  updateFigure(dt);
+  updateFix(dt);
+  updateHold(dt);
+  updateSub(dt);
+  updateArm(dt);
+  updateHorn(dt);
+  updateItems(dt);
+  updateCharges(dt);
+  updateSnow(dt);
+  const zt = mode === 'seated' ? 0 : 1;
+  zoomT += Math.sign(zt - zoomT) * Math.min(Math.abs(zt - zoomT), dt / ZOOM_TIME);
+  const zs = Math.min(ZOOM_STANDING, cv.width * 0.85 / 250, cv.height * 0.75 / 115);
+  viewScale = 1 + (zs - 1) * zoomEase();
+  const k = 1 - Math.exp(-6 * dt);
+  cam.x += (sub.x - cam.x) * k; cam.y += (sub.y - cam.y) * k;
+  shake = Math.max(0, shake - dt);
+  updateSonar(dt);
+}
+
+// ===================== TEXTURES (procedural - see CREDITS.md) =====================
+// The CC0 packs in the brief couldn't be downloaded from this build environment (network blocked), so every
+// surface is generated here. Each one still runs through grimify(), the pipeline real CC0 textures would use:
+// desaturate to ~30%, multiply by a dark teal-grey, then low-frequency grime. Results are cached as patterns.
+const TEX = {};
+const GRIM_TINT = [0x1a, 0x2a, 0x33];        // dark teal-grey the whole interior is multiplied by
+const TEX_SCALE = 1 / 3;                      // texture px per sub-local unit (1 texel ~ 1 screen px when standing)
+let texSeed = 4242;
+const trand = () => (texSeed = (texSeed * 16807) % 2147483647) / 2147483647;
+function makeCanvas(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+// Tileable value noise: p cells across an n x n texture
+function valueNoise(n, p) {
+  const grid = Array.from({ length: p * p }, trand), out = new Float32Array(n * n), g = (i, j) => grid[(j % p) * p + (i % p)];
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+    const fx = x / n * p, fy = y / n * p, x0 = Math.floor(fx), y0 = Math.floor(fy);
+    const sx = (fx - x0) ** 2 * (3 - 2 * (fx - x0)), sy = (fy - y0) ** 2 * (3 - 2 * (fy - y0));
+    const a = g(x0, y0) + (g(x0 + 1, y0) - g(x0, y0)) * sx, b = g(x0, y0 + 1) + (g(x0 + 1, y0 + 1) - g(x0, y0 + 1)) * sx;
+    out[y * n + x] = a + (b - a) * sy;
+  }
+  return out;
+}
+function fbm(n, base, octaves = 4) {
+  const out = new Float32Array(n * n); let amp = 1, tot = 0;
+  for (let o = 0; o < octaves; o++) { const v = valueNoise(n, base << o); for (let i = 0; i < out.length; i++) out[i] += v[i] * amp; tot += amp; amp *= 0.5; }
+  for (let i = 0; i < out.length; i++) out[i] /= tot;
+  return out;
+}
+// The grim pipeline: desaturate, multiply by the tint (with gain so detail survives), darken with blotchy grime
+function grimify(c, { tint = GRIM_TINT, sat = 0.3, gain = 2.6, grime = 0.55 } = {}) {
+  const n = c.width, g = c.getContext('2d'), img = g.getImageData(0, 0, n, c.height), d = img.data, noise = fbm(n, 3);
+  for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+    const l = d[i] * 0.3 + d[i + 1] * 0.59 + d[i + 2] * 0.11, dirt = 1 - grime * Math.pow(noise[p % noise.length], 1.6);
+    for (let k = 0; k < 3; k++) d[i + k] = Math.min(255, (l + (d[i + k] - l) * sat) * tint[k] / 255 * gain * dirt);
+  }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+const circleOn = (g, x, y, r) => { g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill(); };
+function rivet(g, x, y, r = 1.6) {
+  g.fillStyle = 'rgba(0,0,0,0.5)'; circleOn(g, x + 0.7, y + 0.7, r);
+  g.fillStyle = '#c4cbd0'; circleOn(g, x, y, r);
+  g.fillStyle = 'rgba(255,255,255,0.7)'; circleOn(g, x - 0.5, y - 0.5, r * 0.4);
+}
+// Wear: scratches, dents, and drip streaks running down from panel tops (drawn wrapped so the texture tiles)
+function wear(g, n, { scratches = 60, dents = 8, streaks = 14 } = {}) {
+  for (let i = 0; i < scratches; i++) {
+    const x = trand() * n, y = trand() * n, a = (trand() - 0.5) * 1.2, l = 4 + trand() * 22;
+    g.strokeStyle = `rgba(255,255,255,${0.06 + trand() * 0.12})`; g.lineWidth = 0.6;
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke();
+  }
+  for (let i = 0; i < dents; i++) {
+    const x = trand() * n, y = trand() * n, r = 4 + trand() * 10, gr = g.createRadialGradient(x, y, 0, x, y, r);
+    gr.addColorStop(0, 'rgba(0,0,0,0.25)'); gr.addColorStop(1, 'rgba(0,0,0,0)'); g.fillStyle = gr; g.fillRect(x - r, y - r, 2 * r, 2 * r);
+  }
+  for (let i = 0; i < streaks; i++) {
+    const x = trand() * n, y = trand() * n, l = 20 + trand() * 90, w = 1 + trand() * 3;
+    for (const oy of [0, -n]) {
+      const gr = g.createLinearGradient(0, y + oy, 0, y + oy + l);
+      gr.addColorStop(0, 'rgba(20,12,6,0.35)'); gr.addColorStop(1, 'rgba(20,12,6,0)');
+      g.fillStyle = gr; g.fillRect(x, y + oy, w, l);
+    }
+  }
+}
+// Wall plating: bevelled panels, seams, rivet rows
+function paintWallPlate(n = 256) {
+  const c = makeCanvas(n, n), g = c.getContext('2d'), PW = 128, PH = 64;
+  g.fillStyle = '#2a2e31'; g.fillRect(0, 0, n, n);
+  for (let py = 0; py < n; py += PH) for (let px = 0; px < n; px += PW) {
+    const v = 140 + trand() * 40 | 0;
+    g.fillStyle = `rgb(${v},${v + 5},${v + 9})`; g.fillRect(px + 1, py + 1, PW - 2, PH - 2);
+    g.fillStyle = 'rgba(255,255,255,0.18)'; g.fillRect(px + 1, py + 1, PW - 2, 2); g.fillRect(px + 1, py + 1, 2, PH - 2);
+    g.fillStyle = 'rgba(0,0,0,0.35)'; g.fillRect(px + 1, py + PH - 3, PW - 2, 2); g.fillRect(px + PW - 3, py + 1, 2, PH - 2);
+    for (let x = px + 8; x < px + PW; x += 16) { rivet(g, x, py + 6); rivet(g, x, py + PH - 6); }
+  }
+  wear(g, n);
+  return c;
+}
+// Rusted plating for the engine room: same panels, much dirtier, rust blooms
+function paintRust(n = 256) {
+  const c = paintWallPlate(n), g = c.getContext('2d'), rust = fbm(n, 4), img = g.getImageData(0, 0, n, n), d = img.data;
+  for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+    const r = Math.max(0, rust[p] - 0.45) * 2.4;
+    d[i] = d[i] * (1 - r) + 120 * r; d[i + 1] = d[i + 1] * (1 - r) + 62 * r; d[i + 2] = d[i + 2] * (1 - r) + 34 * r;
+  }
+  g.putImageData(img, 0, 0); wear(g, n, { scratches: 30, dents: 14, streaks: 30 });
+  return c;
+}
+// Floor grating: rows of slotted holes
+function paintGrate(n = 128) {
+  const c = makeCanvas(n, n), g = c.getContext('2d');
+  g.fillStyle = '#9aa1a6'; g.fillRect(0, 0, n, n);
+  for (let y = 0; y < n; y += 16) for (let x = 0; x < n; x += 16) {
+    g.fillStyle = '#060708'; g.fillRect(x + 3, y + 5, 10, 6);
+    g.fillStyle = 'rgba(255,255,255,0.25)'; g.fillRect(x + 3, y + 11, 10, 1);
+    g.fillStyle = 'rgba(0,0,0,0.4)'; g.fillRect(x + 3, y + 4, 10, 1);
+  }
+  wear(g, n, { scratches: 20, dents: 4, streaks: 0 });
+  return c;
+}
+// Diamond treadplate for walkways
+function paintTread(n = 128) {
+  const c = makeCanvas(n, n), g = c.getContext('2d');
+  g.fillStyle = '#8e959a'; g.fillRect(0, 0, n, n);
+  for (let y = 0; y < n; y += 16) for (let x = 0; x < n; x += 16) {
+    const ox = (y / 16) % 2 ? 8 : 0, a = ((x + y) / 16) % 2 ? 0.8 : -0.8;
+    g.save(); g.translate(x + ox + 4, y + 8); g.rotate(a);
+    g.fillStyle = 'rgba(0,0,0,0.45)'; g.fillRect(-4, -0.4, 9, 2.4);
+    g.fillStyle = '#c9d0d4'; g.fillRect(-4.5, -1.2, 9, 2); g.restore();
+  }
+  wear(g, n, { scratches: 25, dents: 3, streaks: 0 });
+  return c;
+}
+// Exterior hull: big plates, weld seams, dense rivet rows, heavy grime and rust patches
+function paintHull(n = 256) {
+  const c = makeCanvas(n, n), g = c.getContext('2d'), rust = fbm(n, 6);
+  g.fillStyle = '#7f878d'; g.fillRect(0, 0, n, n);
+  for (const y of [0, 128]) {
+    g.fillStyle = '#3a3f43'; g.fillRect(0, y, n, 3); g.fillStyle = 'rgba(255,255,255,0.25)'; g.fillRect(0, y + 3, n, 1);
+    for (let x = 4; x < n; x += 10) { rivet(g, x, y + 8, 1.3); rivet(g, x, (y + n - 7) % n, 1.3); }
+    const sx = y ? 128 : 0;
+    g.fillStyle = '#3a3f43'; g.fillRect(sx, y, 3, 128); g.fillStyle = 'rgba(255,255,255,0.2)'; g.fillRect(sx + 3, y, 1, 128);
+    for (let yy = y + 8; yy < y + 128; yy += 10) rivet(g, sx + 8, yy, 1.3);
+  }
+  const img = g.getImageData(0, 0, n, n), d = img.data;
+  for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+    const r = Math.max(0, rust[p] - 0.5) * 2.2;
+    d[i] = d[i] * (1 - r) + 110 * r; d[i + 1] = d[i + 1] * (1 - r) + 60 * r; d[i + 2] = d[i + 2] * (1 - r) + 35 * r;
+  }
+  g.putImageData(img, 0, 0); wear(g, n, { scratches: 40, dents: 16, streaks: 40 });
+  return c;
+}
+// Vent grille (used as a drawn prop, so not grimified as a tiling pattern)
+function paintVent(w = 48, h = 32) {
+  const c = makeCanvas(w, h), g = c.getContext('2d');
+  g.fillStyle = '#1b2227'; g.fillRect(0, 0, w, h); g.fillStyle = '#4b5a63'; g.fillRect(1, 1, w - 2, h - 2);
+  for (let y = 5; y < h - 3; y += 4) { g.fillStyle = '#050708'; g.fillRect(4, y, w - 8, 2); g.fillStyle = 'rgba(255,255,255,0.15)'; g.fillRect(4, y + 2, w - 8, 1); }
+  for (const [x, y] of [[3, 3], [w - 3, 3], [3, h - 3], [w - 3, h - 3]]) rivet(g, x, y, 1);
+  return c;
+}
+// Dim yellow/black hazard stripes
+function paintHazard(n = 16) {
+  const c = makeCanvas(n, n), g = c.getContext('2d');
+  g.fillStyle = '#151515'; g.fillRect(0, 0, n, n); g.fillStyle = '#8c7a2c';
+  for (let k = -n; k < 2 * n; k += 8) { g.beginPath(); g.moveTo(k, 0); g.lineTo(k + 4, 0); g.lineTo(k + 4 - n, n); g.lineTo(k - n, n); g.closePath(); g.fill(); }
+  return c;
+}
+// Film grain tile (overlaid each frame at a random offset)
+function paintGrain(n = 256) {
+  const c = makeCanvas(n, n), g = c.getContext('2d'), img = g.createImageData(n, n), d = img.data;
+  for (let i = 0; i < d.length; i += 4) { const v = Math.random() < 0.5 ? 0 : 255; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = Math.random() * 22; }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+// Build everything once, as scaled repeating patterns anchored to the sub (so textures move with it)
+function buildTextures() {
+  const pat = (canvas, scale = TEX_SCALE) => { const p = ctx.createPattern(canvas, 'repeat'); p.setTransform(new DOMMatrix([scale, 0, 0, scale, 0, 0])); return p; };
+  TEX.wall   = pat(grimify(paintWallPlate()));
+  TEX.engine = pat(grimify(paintRust(), { tint: [0x3a, 0x24, 0x1e], gain: 2.3, grime: 0.7 }));
+  TEX.hull   = pat(grimify(paintHull(), { gain: 2.2, grime: 0.7 }), TEX_SCALE * 1.2);
+  TEX.grate  = pat(grimify(paintGrate(), { gain: 2.2, grime: 0.4 }));
+  TEX.tread  = pat(grimify(paintTread(), { gain: 2.3, grime: 0.45 }));
+  TEX.hazard = pat(paintHazard(), TEX_SCALE * 1.4);
+  TEX.vent = paintVent();
+  TEX.grain = ctx.createPattern(paintGrain(), 'repeat');
+}
+
+// ===================== RENDER HELPERS =====================
+const rect = (b, fill, stroke) => { if (fill) { ctx.fillStyle = fill; ctx.fillRect(...b); } if (stroke) { ctx.strokeStyle = stroke; ctx.strokeRect(...b); } };
+function poly(pts) { ctx.beginPath(); pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath(); }
+function brokenX([x, y, w, h]) {
+  ctx.strokeStyle = '#f33'; ctx.lineWidth = 0.8;
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + w, y + h); ctx.moveTo(x + w, y); ctx.lineTo(x, y + h); ctx.stroke();
+}
+// Yellow '!' on a part that's damaged but still working
+function wornMark(x, y) { ctx.font = 'bold 7px monospace'; ctx.fillStyle = '#fd3'; ctx.fillText('!', x, y); ctx.font = '4px monospace'; }
+function label(t, x, y, c = '#ccd') { ctx.fillStyle = c; ctx.fillText(t, x, y); }
+const redLight = () => !power() && darkT < RED_LIGHT_TIME && Math.floor(time * 2.5) % 2 === 0;
+
+// ===================== RENDER: SUB =====================
+// Draw order: propeller, exterior hull, room walls + structure + props, water, equipment, figure.
+// Lighting is NOT done here: draw() multiplies a light map over the whole sub afterwards.
+const TUBES = [  // fluorescent tube fixtures on the ceilings (lit by the light map, flicker in lightsList)
+  { x0: -24, x1: -8, y: -35.2, room: 'crew', off: 0 }, { x0: 18, x1: 36, y: -35.2, room: 'crew', off: 0 },
+  { x0: -104, x1: -84, y: -44.2, room: 'engine', off: 0 },
+];
+function roomsPathOn(g) { g.beginPath(); CREW_ROOM.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath(); g.rect(...ENGINE_ROOM); g.rect(...DOOR_GAP); }
+// A pipe with a round-looking cross section (light stripe along the middle), flanges every `step`
+function pipe(x0, y0, x1, y1, r, step = 22) {
+  const dx = x1 - x0, dy = y1 - y0, l = Math.hypot(dx, dy) || 1, nx = -dy / l, ny = dx / l;
+  const gr = ctx.createLinearGradient(x0 + nx * r, y0 + ny * r, x0 - nx * r, y0 - ny * r);
+  gr.addColorStop(0, '#0b0f12'); gr.addColorStop(0.4, '#4a5a63'); gr.addColorStop(0.55, '#6f828c'); gr.addColorStop(1, '#0b0f12');
+  ctx.strokeStyle = gr; ctx.lineWidth = r * 2; ctx.lineCap = 'butt';
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  ctx.fillStyle = '#26323a';
+  for (let t = step / 2; t < l; t += step) {
+    const cx = x0 + dx * t / l, cy = y0 + dy * t / l;
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(Math.atan2(dy, dx)); ctx.fillRect(-0.8, -r - 0.6, 1.6, 2 * r + 1.2); ctx.restore();
+  }
+}
+// Hanging cable between two points (a little sag, sways with the sub)
+function cable(x0, y0, x1, y1, sag) {
+  const sw = 0;
+  ctx.strokeStyle = '#0d1114'; ctx.lineWidth = 0.7;
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.quadraticCurveTo((x0 + x1) / 2 + sw, Math.max(y0, y1) + sag, x1, y1); ctx.stroke();
+}
+// Dim hazard stripe band
+function hazardBand(x, y, w, h) { ctx.fillStyle = TEX.hazard; ctx.fillRect(x, y, w, h); ctx.strokeStyle = '#0b0c0d'; ctx.lineWidth = 0.4; ctx.strokeRect(x, y, w, h); }
+// Darkened, painted equipment box: base paint + plating texture on top + bevel
+function paintedBox(pts, paint, alpha = 0.55) {
+  poly(pts); ctx.fillStyle = paint; ctx.fill();
+  ctx.globalAlpha = alpha; ctx.fillStyle = TEX.wall; ctx.fill(); ctx.globalAlpha = 1;
+  ctx.strokeStyle = '#07090a'; ctx.lineWidth = 0.7; ctx.stroke();
+}
+const boxPts = ([x, y, w, h]) => [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+
+// The sub is drawn in two layers:
+//  - drawSubStatic(): everything that never changes (hull plating, walls, ribs, pipes, props, equipment bodies).
+//    Rendered ONCE into an offscreen image at the standing zoom (rebuilt only when the window size changes).
+//  - drawSub(): blits that image, then draws only what moves or changes state on top.
+const SUBL_BOX = [-126, -62, 252, 128];   // sub-local area the cached layer covers
+let subLayer = null;
+const subLayerScale = () => Math.min(ZOOM_STANDING, cv.width * 0.85 / 240, cv.height * 0.75 / 130);
+function buildSubLayer() {
+  const sc = subLayerScale(), [bx, by, bw, bh] = SUBL_BOX, c = makeCanvas(Math.ceil(bw * sc), Math.ceil(bh * sc));
+  const keep = ctx; ctx = c.getContext('2d');
+  ctx.setTransform(sc, 0, 0, sc, -bx * sc, -by * sc);
+  drawSubStatic();
+  ctx = keep;
+  subLayer = { c, sc };
+}
+function drawSubStatic() {
+  ctx.lineJoin = 'round';
+  // --- Propeller shaft (the disc spins, so it's drawn live)
+  pipe(PROP_POS[0], 1, PROP_POS[0], PROP_POS[1] - 13, 2.6, 6);
+  // --- Exterior hull: plating texture, dark outline, cold rim highlight along the top edge
+  poly(HULL_OUTLINE); ctx.fillStyle = TEX.hull; ctx.fill();
+  ctx.strokeStyle = '#05070a'; ctx.lineWidth = 1.6; ctx.stroke();
+  ctx.strokeStyle = 'rgba(150,190,200,0.35)'; ctx.lineWidth = 0.6;
+  ctx.beginPath(); ctx.moveTo(-119, -50.3); ctx.lineTo(105.5, -50.3); ctx.lineTo(111.5, -39.5); ctx.stroke();
+  // --- Rooms: walls (cabin = teal plating, engine room = rusty and redder)
+  poly(CREW_ROOM); ctx.fillStyle = TEX.wall; ctx.fill();
+  ctx.fillStyle = TEX.engine; ctx.fillRect(...ENGINE_ROOM);
+  ctx.fillStyle = TEX.wall; ctx.fillRect(...DOOR_GAP);   // the doorway (the door slab is drawn live over it)
+  ctx.save(); roomsPathOn(ctx); ctx.clip();
+  // Structural ribs
+  for (const x of [-96, -70, 12, 44, 76]) {
+    ctx.fillStyle = 'rgba(5,8,10,0.55)'; ctx.fillRect(x - 2.5, -60, 5, 120);
+    ctx.fillStyle = 'rgba(140,170,180,0.12)'; ctx.fillRect(x - 2.5, -60, 0.6, 120);
+    ctx.fillStyle = '#5d6b72'; for (let y = -50; y < 50; y += 7) { ctx.beginPath(); ctx.arc(x, y, 0.5, 0, Math.PI * 2); ctx.fill(); }
+  }
+  // Ceiling shadow bands + floor-level grime
+  let gr = ctx.createLinearGradient(0, -36, 0, -26); gr.addColorStop(0, 'rgba(0,0,0,0.55)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = gr; ctx.fillRect(-35, -36, 150, 10);
+  gr = ctx.createLinearGradient(0, -45, 0, -36); gr.addColorStop(0, 'rgba(0,0,0,0.6)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = gr; ctx.fillRect(ENGINE_ROOM[0], ENGINE_ROOM[1], ENGINE_ROOM[2], 9);
+  gr = ctx.createLinearGradient(0, 25, 0, 41); gr.addColorStop(0, 'rgba(10,6,2,0)'); gr.addColorStop(1, 'rgba(10,6,2,0.5)');
+  ctx.fillStyle = gr; ctx.fillRect(-40, 25, 150, 16);
+  // Pipes along the ceilings, a riser on the back wall, pipes in the engine room
+  pipe(-34, -32.6, 46, -32.6, 1.5); pipe(-30, -29.6, 30, -29.6, 1);
+  pipe(30, -29.6, 30, -10, 1); pipe(-6, -32.6, -6, -2, 1.2, 14);
+  pipe(-110, -41, -52, -41, 1.4); pipe(-88, -41, -88, -38, 1.2, 99); pipe(-66, -8, -50, -8, 1.6);
+  ctx.fillStyle = '#11171b'; for (const x of [-20, 4, 26, 40]) ctx.fillRect(x - 0.5, -36, 1, 4);
+  cable(-28, -31, -8, -31, 4); cable(2, -31, 22, -30, 3); cable(-108, -40, -92, -40, 3);
+  // Vent on the back wall + a crate in the engine room corner
+  ctx.drawImage(TEX.vent, 8, -24, 14, 9);
+  paintedBox(boxPts([-112, -12, 9, 9]), '#3a3226', 0.6);
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 0.5; ctx.beginPath(); ctx.moveTo(-112, -12); ctx.lineTo(-103, -3); ctx.moveTo(-103, -12); ctx.lineTo(-112, -3); ctx.stroke();
+  // Light fixtures (the light itself comes from the light map)
+  for (const t of TUBES) { ctx.fillStyle = '#0e1215'; ctx.fillRect(t.x0 - 1, t.y - 1.4, t.x1 - t.x0 + 2, 1.6); ctx.fillStyle = '#3a4448'; ctx.fillRect(t.x0, t.y + 0.2, t.x1 - t.x0, 0.9); }
+  ctx.restore();
+  // Walkway: diamond treadplate along the floor and up the slope
+  ctx.beginPath(); ctx.moveTo(-37, 3);
+  for (let x = -37; x <= 107; x += 2) ctx.lineTo(x, footY(Math.max(WALK_X[0] - 13, x)));
+  ctx.lineTo(107, 45); ctx.lineTo(6, 45); ctx.lineTo(-11, 37); ctx.lineTo(-27, 19); ctx.lineTo(-40, 6); ctx.closePath();
+  ctx.fillStyle = TEX.tread; ctx.fill(); ctx.strokeStyle = 'rgba(160,190,200,0.25)'; ctx.lineWidth = 0.5; ctx.stroke();
+  ctx.fillStyle = TEX.grate; ctx.fillRect(ENGINE_ROOM[0], -5, ENGINE_ROOM[2], 3);
+  ctx.strokeStyle = '#030405'; ctx.lineWidth = 1; poly(CREW_ROOM); ctx.stroke(); ctx.strokeRect(...ENGINE_ROOM);
+  ctx.font = '3.6px monospace'; ctx.textAlign = 'center';
+  // --- Engine housing with gauge faces (needles are live)
+  paintedBox(boxPts(ENGINE_BOX), '#33204a', 0.5);
+  for (const [x, y, r] of ENGINE_GAUGES) { ctx.fillStyle = '#120c18'; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#5c4870'; ctx.lineWidth = 0.6; ctx.stroke(); }
+  pipe(-64, -32, -54, -32, 1.2, 99);
+  label('ENGINE', -82, -36, '#9a8aa8');
+  // --- Breaker box (lever is live)
+  paintedBox(boxPts([BREAKER_POS[0] - 3, BREAKER_POS[1] - 4, 6, 8]), '#1d2226', 0.4);
+  label('BRK', BREAKER_POS[0], BREAKER_POS[1] - 5, '#7d8a92');
+  // --- Hazard frame over the doorway
+  hazardBand(DOOR_GAP[0] - 1, -27, DOOR_GAP[2] + 2, 2);
+  // --- Storage locker, panel console, pump (state overlays are live)
+  paintedBox(STORAGE_POLY, '#7a4a14', 0.5);
+  hazardBand(58, -26.6, 46, 1.6);
+  paintedBox(PANEL_POLY, '#1f4426', 0.5);
+  ctx.strokeStyle = '#3fa060'; ctx.lineWidth = 0.4; poly(PANEL_POLY); ctx.stroke();
+  label('PANEL', 95, 30, '#5a8a66');
+  paintedBox(boxPts(PUMP_BOX), '#1d2850', 0.45);
+  ctx.drawImage(TEX.vent, PUMP_BOX[0] + 2, PUMP_BOX[1] + 1.5, 9, 5);
+  label('PUMP', 20.5, 47.5, '#7a8ab8');
+  label('AIR CRANK', CRANK_POS[0], CRANK_POS[1] + 11, '#6a7a82');
+  // --- Module slot frames: dark red hatches with bolts (modules are live)
+  for (const s of SLOTS) {
+    ctx.save(); ctx.translate(...s.c); ctx.rotate(s.ang);
+    rect([-s.w / 2 - 0.8, -s.h / 2 - 0.8, s.w + 1.6, s.h + 1.6], '#0a0b0c');
+    paintedBox(boxPts([-s.w / 2, -s.h / 2, s.w, s.h]), '#5a1414', 0.35);
+    ctx.fillStyle = '#a8a39a';
+    for (const [x, y] of [[-s.w / 2 + 1.2, -s.h / 2 + 1.2], [s.w / 2 - 1.2, -s.h / 2 + 1.2], [-s.w / 2 + 1.2, s.h / 2 - 1.2], [s.w / 2 - 1.2, s.h / 2 - 1.2]]) { ctx.beginPath(); ctx.arc(x, y, 0.5, 0, Math.PI * 2); ctx.fill(); }
+    ctx.restore();
+  }
+  // --- Chair: dark padded seat facing the panel
+  ctx.fillStyle = '#15191c';
+  ctx.beginPath(); ctx.moveTo(37, -10); ctx.lineTo(41, -11); ctx.lineTo(48, 33); ctx.lineTo(44, 34); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(46, 24); ctx.lineTo(74, 23); ctx.lineTo(76, 31); ctx.lineTo(46, 35); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(150,175,185,0.25)'; ctx.lineWidth = 0.5;
+  ctx.beginPath(); ctx.moveTo(41, -10.5); ctx.lineTo(47.6, 32); ctx.moveTo(46.5, 24.2); ctx.lineTo(73.8, 23.4); ctx.stroke();
+  ctx.fillStyle = '#0c0f11'; ctx.fillRect(48, 37, 26, 2.5); ctx.fillRect(59, 34, 3, 4);
+}
+const ENGINE_GAUGES = [[-88, -26, 4], [-74, -24, 3.5], [-92, -14, 3]];
+// A dark wash over a piece of equipment that's broken (the cached layer always shows it intact)
+function brokenWash(pts) { poly(pts); ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fill(); }
+
+function drawSub() {
+  if (!subLayer || Math.abs(subLayer.sc - subLayerScale()) > 0.01) buildSubLayer();
+  const blink = sub.hullImm > 0.6 && Math.floor(time * 15) % 2 === 0;
+  ctx.save(); ctx.translate(sub.x, sub.y); ctx.rotate(visAng());
+  ctx.lineJoin = 'round';
+  // --- Propeller disc (spinning)
+  const pr = parts.propeller;
+  ctx.beginPath(); ctx.ellipse(PROP_POS[0], PROP_POS[1], 12, 15, 0, 0, Math.PI * 2);
+  ctx.fillStyle = pr.broken ? '#2a2224' : pr.bumps ? '#5a4650' : '#4a3d5c'; ctx.fill(); ctx.strokeStyle = '#07080a'; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.strokeStyle = 'rgba(160,140,190,0.35)'; ctx.lineWidth = 1.2;
+  if (!pr.broken) for (let i = 0; i < 3; i++) { const a = propAng + i * 2.09; ctx.beginPath(); ctx.ellipse(PROP_POS[0], PROP_POS[1], 10 * Math.abs(Math.cos(a)), 13, 0, 0, Math.PI * 2); ctx.stroke(); }
+  ctx.beginPath(); ctx.ellipse(PROP_POS[0], PROP_POS[1], 4.5, 6, 0, 0, Math.PI * 2); ctx.fillStyle = '#20182a'; ctx.fill();
+  // --- Everything static, in one blit
+  ctx.drawImage(subLayer.c, ...SUBL_BOX);
+  if (blink) { poly(HULL_OUTLINE); ctx.fillStyle = 'rgba(255,60,40,0.3)'; ctx.fill(); }
+  // --- Loose items lying on the floor
+  for (const it of items) if (it.where === 'floor') { const p = itemPos(it); drawItemIcon(it.type, p.x, p.y); }
+  // --- Water (cabin + engine room): murky teal, surface level with the world, sloshing, small waves
+  drawWater();
+  ctx.font = '3.6px monospace'; ctx.textAlign = 'center'; ctx.lineWidth = 0.6;
+  // --- Engine: needles twitch while it runs, report mark when it's off
+  const run = engine.state === 'running';
+  if (!run) { poly(boxPts(ENGINE_BOX)); ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fill(); }
+  ctx.lineWidth = 0.6;
+  for (const [x, y, r] of ENGINE_GAUGES) {
+    const a = run ? -0.6 + Math.sin(time * 3 + x) * 0.3 + (Math.random() - 0.5) * 0.1 : 0.6;
+    ctx.strokeStyle = run ? '#d9c070' : '#4a4030'; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(a) * r * 0.8, y + Math.sin(a) * r * 0.8); ctx.stroke();
+  }
+  if (!run && engine.report) label(engine.report === 'malfunction' ? 'X' : engine.report === 'prevention' ? '!' : 'FUEL', -82, -9, engine.report === 'malfunction' ? '#f44' : '#fc3');
+  // --- Breaker lever
+  rect([BREAKER_POS[0] - 1, BREAKER_POS[1] + (gen.on ? -3 : 0), 2, 3], gen.on ? '#3a9a62' : '#a83232');
+  // --- Bay door slab (slides up as the wheel opens it) + wheel
+  const dh = DOOR[3] * (1 - hatch.progress);
+  if (dh > 0.5) { paintedBox(boxPts([DOOR[0], DOOR[1], DOOR[2], dh]), '#7a6a24', 0.45); hazardBand(DOOR[0], DOOR[1] + dh - 2, DOOR[2], 2); }
+  drawWheel(false);
+  // --- Storage: spare part count, damage
+  label(`STORAGE  ${storedParts()}/${MAX_PARTS}`, 80, -29.5, '#c8a878');
+  if (parts.storage.broken) { brokenWash(STORAGE_POLY); brokenX([58, -36, 44, 11]); } else if (parts.storage.worn) wornMark(103, -28);
+  // --- Panel: little screens + blinking buttons (their glow onto the room comes from the light map)
+  const live = power() && panelOk();
+  rect([97, -20, 6, 8], live ? '#0b3a22' : '#060808', '#000'); rect([98, -8, 7, 8], terminalAlive() ? '#0b3a22' : '#060808', '#000');
+  if (live) { ctx.fillStyle = 'rgba(120,255,180,0.6)'; for (let i = 0; i < 3; i++) ctx.fillRect(98, -18.5 + i * 2.2, 2 + ((time * 3 + i) % 3), 0.6); }
+  for (let i = 0; i < 4; i++) rect([86 + i * 4, 18, 2, 1.4], live && Math.sin(time * 4 + i * 1.7) > 0 ? ['#4f4', '#fc3', '#4cf', '#f55'][i] : '#1a2020');
+  if (parts.panel.broken) { brokenWash(PANEL_POLY); brokenX([83, 16, 24, 25]); } else if (parts.panel.worn) wornMark(88, 22);
+  // --- Pump damage + dry-run sparks
+  if (parts.pumpMech.broken || parts.pumpMech.dead) { brokenWash(boxPts(PUMP_BOX)); brokenX(PUMP_BOX); } else if (parts.pumpMech.worn) wornMark(3, 46);
+  if (pumpSpark > 0) for (let i = 0; i < 6; i++) rect([6 + Math.random() * 20, 40 + Math.random() * 8, 1.5, 1.5], '#ffe680');
+  // --- Air crank (turns)
+  ctx.save(); ctx.translate(...CRANK_POS); ctx.rotate(crank.ang);
+  ctx.strokeStyle = '#2e3a40'; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.arc(0, 0, CRANK_R, 0, Math.PI * 2); ctx.moveTo(0, 0); ctx.lineTo(CRANK_R, 0); ctx.stroke();
+  ctx.strokeStyle = '#6a7a82'; ctx.lineWidth = 0.4; ctx.beginPath(); ctx.arc(0, 0, CRANK_R - 0.6, -2.5, -0.8); ctx.stroke();
+  ctx.fillStyle = '#7a3a2a'; ctx.beginPath(); ctx.arc(CRANK_R, 0, 1.6, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  // --- Modules sitting in the slots
+  SLOTS.forEach((s, i) => {
+    const m = moduleIn(i);
+    if (!m) return;
+    ctx.save(); ctx.translate(...s.c); ctx.rotate(s.ang);
+    const w = Math.min(s.w, s.h) > 12 ? s.w - 6 : s.w - 2, h = Math.min(s.h - 2, 9);
+    ctx.rotate(s.h > s.w ? -Math.PI / 2 : 0);
+    const ww = s.h > s.w ? s.h - 6 : w;
+    paintedBox(boxPts([-ww / 2, -h / 2, ww, h]), MODULE_COLORS[m.id], 0.25);
+    ctx.strokeStyle = m.broken ? '#f33' : m.worn ? '#fd3' : '#6a9a88'; ctx.lineWidth = 0.5; ctx.strokeRect(-ww / 2, -h / 2, ww, h);
+    label(m.id + (m.worn && !m.broken ? '!' : ''), 0, 1.3, m.broken ? '#f66' : m.worn ? '#fd3' : '#b8d8cc');
+    ctx.restore();
+  });
+  drawFigure();
+  if (hold.id) {
+    const t = handTarget(), f = t && t.hold ? hold.t / t.hold : 0;
+    rect([hand.x - 8, hand.y - 9, 16, 2.5], '#222'); rect([hand.x - 8, hand.y - 9, 16 * f, 2.5], '#fa3');
+  }
+  ctx.restore();
+}
+// One body of water: fill from its tilted, wavy surface down, clipped to its room
+const waveY = (x, surfAt) => surfAt(x) + Math.sin(x * 0.3 + time * 3) * 0.5 + Math.sin(x * 0.11 - time * 1.7) * 0.4;
+function waterBody(clipFn, x0, x1, surfAt) {
+  ctx.save(); clipFn(); ctx.clip();
+  ctx.beginPath(); ctx.moveTo(x0, 60);
+  for (let x = x0; x <= x1; x += 3) ctx.lineTo(x, waveY(x, surfAt));
+  ctx.lineTo(x1, 60); ctx.closePath();
+  ctx.fillStyle = 'rgba(14,52,64,0.74)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(120,200,215,0.55)'; ctx.lineWidth = 0.6;
+  ctx.beginPath(); for (let x = x0; x <= x1; x += 3) { const y = waveY(x, surfAt); x === x0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } ctx.stroke();
+  ctx.restore();
+}
+// The cabin waterline catches a little light even in the dark, so you can always read how high it is.
+// Drawn after the light map (additive), before the fog.
+function waterSheen() {
+  if (storageLeaking()) {   // air jetting out of the cracked charge rack (also catches a little light)
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 9; i++) {
+      const k = (time * 1.4 + i / 9) % 1; ctx.fillStyle = `rgba(90,105,110,${0.35 * (1 - k)})`;
+      ctx.beginPath(); ctx.arc(64 + i * 4 + Math.sin(i * 3 + time) * 2, -25 + k * 10, 0.8 + k * 3, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+  if (water <= 0.001) return;
+  ctx.save(); poly(CREW_ROOM); ctx.clip(); ctx.globalCompositeOperation = 'lighter';
+  ctx.strokeStyle = 'rgba(40,110,130,0.5)'; ctx.lineWidth = 0.8; ctx.beginPath();
+  for (let x = -40; x <= 112; x += 3) { const y = waveY(x, crewSurfAt); x === -40 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }
+  ctx.stroke(); ctx.restore();
+}
+function drawWater() {
+  const slope = surfaceSlope();
+  if (water > 0.001) waterBody(() => { poly(CREW_ROOM); }, -40, 112, crewSurfAt);
+  if (engWater > 0.001) waterBody(() => { ctx.beginPath(); ctx.rect(...ENGINE_ROOM); }, -114, -48, x => engSurfY() + slope * (x + 80));
+  // Water pouring out of the bay door into the cabin
+  if (doorStream > 0.001) {
+    const top = Math.max(doorOpenTo(), engSurfY()), w = clamp(doorStream * 120, 1.5, 6), bottom = Math.min(crewSurfY(), CREW_FLOOR);
+    ctx.fillStyle = 'rgba(60,140,160,0.6)';
+    ctx.beginPath(); ctx.moveTo(-37, top); ctx.lineTo(-37 + w, top);
+    ctx.quadraticCurveTo(-30 + w, top + 6, -27 + w * 0.6, bottom); ctx.lineTo(-30, bottom); ctx.quadraticCurveTo(-34, top + 8, -37, top); ctx.fill();
+    ctx.fillStyle = 'rgba(200,240,250,0.5)';
+    for (let i = 0; i < 6; i++) { const t = (time * 2 + i / 6) % 1; ctx.fillRect(-36 + t * 6 + Math.random(), top + t * (bottom - top), 0.8, 1.6); }
+  }
+}
+function drawWheel(glow) {
+  ctx.save(); ctx.translate(...WHEEL_POS); ctx.rotate(hatch.progress * HATCH_TURNS * Math.PI * 2);
+  ctx.strokeStyle = glow ? '#ffd860' : '#8f7f2e'; ctx.lineWidth = 3;
+  if (glow) { ctx.shadowColor = '#ffb040'; ctx.shadowBlur = 10; }
+  ctx.beginPath(); ctx.arc(0, 0, WHEEL_R - 1.5, 0, Math.PI * 2); ctx.stroke();
+  ctx.lineWidth = 2; ctx.beginPath();
+  for (let i = 0; i < 3; i++) { const a = i * Math.PI / 1.5 - Math.PI / 2; ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a) * WHEEL_R, Math.sin(a) * WHEEL_R); }
+  ctx.stroke();
+  if (!glow) { ctx.strokeStyle = 'rgba(255,240,180,0.25)'; ctx.lineWidth = 0.6; ctx.beginPath(); ctx.arc(0, 0, WHEEL_R - 2.6, -2.4, -1.2); ctx.stroke(); }
+  ctx.restore();
+}
+// Stick figure with a cap (brim = the way he faces) and one controllable arm
+function drawFigure() {
+  ctx.strokeStyle = '#b9c6cc'; ctx.fillStyle = '#b9c6cc'; ctx.lineWidth = 2.6; ctx.lineCap = 'round';
+  if (mode === 'seated') {
+    const hx = 60, hy = 23;   // hips on the seat
+    ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(hx - 1, hy - 16);           // torso
+    ctx.moveTo(hx, hy); ctx.lineTo(hx + 11, hy); ctx.lineTo(hx + 13, 39);       // thigh, shin
+    ctx.moveTo(hx - 1, hy - 14); ctx.lineTo(hx + 10, hy - 11); ctx.lineTo(95, 2); // arm on the panel
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(hx - 1, hy - 21, 4.6, 0, Math.PI * 2); ctx.fill();
+    drawCap(hx - 1, hy - 21, 1);
+  } else {
+    const x = fig.x, fy = footY(x), f = fig.face;
+    const sw = Math.sin(fig.walk * 10) * 5 * Math.min(1, Math.abs(fig.vx) / 15);
+    const lean = fig.stun > 0 ? Math.sign(fig.vx) * 4 : 0;
+    const hipY = fy - 20, neckY = fy - FIG_HEIGHT + 11;
+    ctx.beginPath();
+    ctx.moveTo(x + sw, fy); ctx.lineTo(x, hipY); ctx.lineTo(x - sw, fy);         // legs
+    ctx.moveTo(x, hipY); ctx.lineTo(x + lean, neckY);                             // torso
+    // Free arm hangs
+    ctx.moveTo(x + lean, neckY + 3); ctx.lineTo(x - (f || 1) * 3, neckY + 13); ctx.lineTo(x - (f || 1) * 2, neckY + 22);
+    // Controlled arm: shoulder -> elbow -> hand (two-bone, elbow bends down)
+    const s = shoulder(), dx = hand.x - s.x, dy = hand.y - s.y, d = Math.min(Math.hypot(dx, dy), HAND_REACH - 0.01);
+    const l = HAND_REACH / 2, mx = s.x + dx / 2, my = s.y + dy / 2, off = Math.sqrt(Math.max(0, l * l - (d / 2) ** 2));
+    let px = -dy, py = dx; const pl = Math.hypot(px, py) || 1; px /= pl; py /= pl; if (py < 0) { px = -px; py = -py; }
+    ctx.moveTo(s.x + lean, s.y); ctx.lineTo(mx + px * off, my + py * off); ctx.lineTo(hand.x, hand.y);
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(x + lean, neckY - 5, 4.6, 0, Math.PI * 2); ctx.fill();
+    drawCap(x + lean, neckY - 5, f);
+    // Hand (grips show as a ring) and whatever it carries
+    ctx.beginPath(); ctx.arc(hand.x, hand.y, 1.8, 0, Math.PI * 2); ctx.fill();
+    if (grip) { ctx.strokeStyle = '#fa3'; ctx.lineWidth = 0.8; ctx.beginPath(); ctx.arc(hand.x, hand.y, 3.5, 0, Math.PI * 2); ctx.stroke(); }
+    if (isItem(carry)) drawItemIcon(carry.type, hand.x, hand.y);
+    else if (carry) { rect([hand.x - 7, hand.y - 3, 14, 6], MODULE_COLORS[carry.id], carry.broken ? '#f33' : '#9fc'); ctx.font = '4px monospace'; label(carry.id, hand.x, hand.y + 1.4, '#dfe'); }
+  }
+  ctx.lineCap = 'butt';
+}
+// Cap on top of the head; the brim points the way he faces (f = 0 while turning: brim centered)
+function drawCap(x, y, f) {
+  ctx.fillStyle = '#c22';
+  ctx.beginPath(); ctx.arc(x, y - 1.5, 4.8, Math.PI, 0); ctx.fill();
+  ctx.fillRect(f >= 0 ? x - 1 : x - 7.5, y - 2.2, f === 0 ? 2 : 8.5, 1.6);
+}
+// Robot arm: grey segments, orange pincer
+function drawArm(S, k, lw) {
+  const b = armBase();
+  const [bx, by] = S(b.x, b.y), [tx, ty] = S(arm.tipX, arm.tipY);
+  const dx = tx - bx, dy = ty - by, d = Math.hypot(dx, dy) || 1, ux = dx / d, uy = dy / d;
+  const bend = Math.sqrt(Math.max(0, (ARM_REACH * k) ** 2 - d * d)) * 0.35 + (arm.broken ? 10 * k : 0);
+  const ex = (bx + tx) / 2 - uy * bend, ey = (by + ty) / 2 + ux * bend;
+  ctx.strokeStyle = arm.broken ? '#666' : '#777'; ctx.lineWidth = lw * 1.6; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(ex, ey); ctx.lineTo(tx, ty); ctx.stroke();
+  ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(ex, ey, 2 * k, 0, Math.PI * 2); ctx.fill();
+  const a = Math.atan2(ty - ey, tx - ex), open = arm.held ? 0.15 : 0.55, len = 7 * k;
+  ctx.strokeStyle = arm.broken ? '#777' : arm.held ? RELIC_COLOR : '#f80'; ctx.lineWidth = lw * 1.3;
+  ctx.beginPath();
+  for (const s of [-1, 1]) {
+    const mx = tx + Math.cos(a + s * open) * len, my = ty + Math.sin(a + s * open) * len;
+    ctx.moveTo(tx, ty); ctx.lineTo(mx, my); ctx.lineTo(mx + Math.cos(a - s * 0.9) * len * 0.5, my + Math.sin(a - s * 0.9) * len * 0.5);
+  }
+  ctx.stroke(); ctx.lineCap = 'butt';
+  if (arm.held) {
+    const need = arm.held.scrap ? SCRAP_GRAB_TIME : TIE_TIME;
+    ctx.beginPath(); ctx.arc(tx, ty, 13 * k, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * arm.tie / need); ctx.stroke();
+  }
+}
+// Rail (green line under the hull), drawn in world space
+function drawRail(S, lw) {
+  ctx.strokeStyle = '#1d4a28'; ctx.lineWidth = lw * 2; ctx.lineCap = 'round';
+  ctx.beginPath(); RAIL.forEach((p, i) => { const w = subPoint(p), [x, y] = S(w.x, w.y); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.stroke();
+  ctx.lineCap = 'butt';
+}
+function drawBalloons(S, k) {
+  for (const r of relics) {
+    if (r.state !== 'rising') continue;
+    const [x, y] = S(r.x, r.y), s = RELIC_SIZE * k;
+    ctx.strokeStyle = RELIC_COLOR; ctx.lineWidth = 1.5;
+    ctx.strokeRect(x - s / 2, y - s / 2, s, s);
+    ctx.beginPath(); ctx.moveTo(x, y - s / 2); ctx.lineTo(x, y - 40 * k); ctx.stroke();
+    ctx.fillStyle = '#e44'; ctx.beginPath(); ctx.arc(x, y - 52 * k, 12 * k, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+// ===================== LIGHTING =====================
+// A small light map in the sub's own coordinates (it only covers the sub, not the screen): white where nothing
+// changes, a dim ambient fill per room, lights added on top. It's multiplied over the sub, then the light
+// sources get an additive bloom. Light is smooth, so a low resolution scaled up looks the same and costs little.
+let lightCv = null, lightG = null, frameLights = [];
+const LIGHT_RES = 1.2;   // light map px per sub-local unit
+const rgbS = c => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
+// Ambient fill per room for the current situation. The engine room is always darker and redder.
+function ambientLevels() {
+  if (power()) return sys.lights ? { crew: [54, 70, 76], engine: [48, 30, 27], hull: [70, 86, 92] }
+                                 : { crew: [20, 25, 30], engine: [18, 11, 10], hull: [50, 57, 64] };
+  if (darkT < RED_LIGHT_TIME) return { crew: [24, 9, 9], engine: [20, 7, 7], hull: [40, 42, 48] };
+  return { crew: [5, 6, 8], engine: [4, 3, 3], hull: [30, 33, 38] };   // pitch dark
+}
+// Every light this frame, in sub-local coords: { x, y, r, c: [r,g,b], i (0..1), sx, sy (stretch) }
+const strobe = () => Math.pow(Math.max(0, Math.sin(time * 7)), 2);
+function lightsList(dt) {
+  const L = [], add = (x, y, r, c, i, sx = 1, sy = 1) => { if (i > 0.01) L.push({ x, y, r, c, i, sx, sy }); };
+  // Fluorescent tubes with a soft cone downward. They flicker; the engine room one is worse.
+  if (power() && sys.lights) for (const t of TUBES) {
+    if (t.off > 0) t.off -= dt; else if (Math.random() < (t.room === 'engine' ? 0.7 : 0.18) * dt) t.off = 0.04 + Math.random() * 0.2;
+    const i = t.off > 0 ? 0.12 : 0.9 + Math.sin(time * 90 + t.x0) * 0.05;
+    add((t.x0 + t.x1) / 2, t.y + 15, 50, t.room === 'engine' ? [205, 140, 105] : [140, 195, 200], i, 1.5, 1.2);
+  }
+  // Screen light from the panel's monitors and buttons
+  if (power() && panelOk()) { add(100, -12, 32, [60, 230, 150], 0.55); add(92, 18, 14, [80, 220, 200], 0.3); }
+  // Running engine: violet housing glow + warm heat
+  if (engine.state === 'running') { add(-82, -24, 30, [150, 80, 230], 0.32); add(-82, -12, 22, [255, 130, 60], 0.18 + Math.random() * 0.05); }
+  // Power out: red emergency strobe for RED_LIGHT_TIME, then nothing but the bay wheel's glow
+  if (!power()) {
+    if (darkT < RED_LIGHT_TIME) { add(40, -30, 120, [255, 40, 30], 0.15 + 0.85 * strobe()); add(-80, -30, 70, [255, 40, 30], 0.15 + 0.85 * strobe()); }
+    else add(...WHEEL_POS, 18, [255, 170, 60], 0.9);
+  } else {
+    // Damaged rooms strobe red even with power on
+    const crewHurt = parts.panel.broken || parts.storage.broken || parts.pumpMech.broken || parts.pumpMech.dead || modules.some(m => m.broken && m.slot >= 0);
+    if (crewHurt) add(60, -30, 95, [255, 40, 30], 0.42 * strobe());
+    if (parts.propeller.broken) add(-80, -30, 60, [255, 40, 30], 0.42 * strobe());
+  }
+  if (pumpSpark > 0 && Math.random() < 0.5) add(16, 44, 34, [255, 235, 150], 0.9);
+  // Your own faint silhouette (eyes adapting) so you can just about see yourself in the dark
+  if (mode === 'seated') add(58, 2, 26, [26, 30, 34], 1); else add(fig.x, footY(fig.x) - 35, 28, [26, 30, 34], 1);
+  return L;
+}
+function applyLighting(M, dt) {
+  const [bx, by, bw, bh] = SUBL_BOX, lw = Math.ceil(bw * LIGHT_RES), lh = Math.ceil(bh * LIGHT_RES);
+  if (!lightCv) { lightCv = makeCanvas(lw, lh); lightG = lightCv.getContext('2d'); }
+  const g = lightG, A = ambientLevels();
+  frameLights = lightsList(dt);
+  g.setTransform(1, 0, 0, 1, 0, 0); g.globalCompositeOperation = 'source-over';
+  g.fillStyle = '#fff'; g.fillRect(0, 0, lw, lh);   // around the hull: unchanged
+  g.setTransform(LIGHT_RES, 0, 0, LIGHT_RES, -bx * LIGHT_RES, -by * LIGHT_RES);
+  // Exterior: hull shell + propeller get the hull ambient
+  g.fillStyle = rgbS(A.hull);
+  g.beginPath(); HULL_OUTLINE.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath(); g.fill();
+  g.beginPath(); g.ellipse(PROP_POS[0], PROP_POS[1], 13, 16, 0, 0, Math.PI * 2); g.fill(); g.fillRect(PROP_POS[0] - 4, 0, 8, PROP_POS[1]);
+  // Rooms
+  g.fillStyle = rgbS(A.crew); g.beginPath(); CREW_ROOM.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath(); g.rect(...DOOR_GAP); g.fill();
+  g.fillStyle = rgbS(A.engine); g.fillRect(...ENGINE_ROOM);
+  // Lights, additive, only inside the rooms
+  g.save(); roomsPathOn(g); g.clip(); g.globalCompositeOperation = 'lighter';
+  for (const l of frameLights) {
+    g.save(); g.translate(l.x, l.y); g.scale(l.sx, l.sy);
+    const gr = g.createRadialGradient(0, 0, 0, 0, 0, l.r), c = l.c.join(',');
+    gr.addColorStop(0, `rgba(${c},${l.i})`); gr.addColorStop(0.5, `rgba(${c},${l.i * 0.35})`); gr.addColorStop(1, `rgba(${c},0)`);
+    g.fillStyle = gr; g.fillRect(-l.r, -l.r, 2 * l.r, 2 * l.r); g.restore();
+  }
+  g.restore();
+  // Multiply over the sub only
+  ctx.save(); ctx.setTransform(M); ctx.translate(sub.x, sub.y); ctx.rotate(visAng());
+  ctx.globalCompositeOperation = 'multiply'; ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(lightCv, bx, by, bw, bh); ctx.restore();
+  // Bloom: the sources themselves glow (high graphics only)
+  if (gfxHigh) bloom(M);
+  // In pitch dark the wheel handle glows on its own
+  if (!power() && darkT >= RED_LIGHT_TIME) { ctx.save(); ctx.setTransform(M); ctx.translate(sub.x, sub.y); ctx.rotate(visAng()); drawWheel(true); ctx.restore(); }
+}
+function bloom(M) {
+  ctx.save(); ctx.setTransform(M); ctx.translate(sub.x, sub.y); ctx.rotate(visAng()); ctx.globalCompositeOperation = 'lighter';
+  const glow = (x, y, r, c, i) => { const gr = ctx.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, `rgba(${c},${i})`); gr.addColorStop(1, `rgba(${c},0)`); ctx.fillStyle = gr; ctx.fillRect(x - r, y - r, 2 * r, 2 * r); };
+  if (power() && sys.lights) for (const t of TUBES) {
+    if (t.off > 0) continue;
+    ctx.strokeStyle = t.room === 'engine' ? 'rgba(255,215,180,0.9)' : 'rgba(215,245,250,0.9)'; ctx.lineWidth = 0.9;
+    ctx.beginPath(); ctx.moveTo(t.x0 + 0.5, t.y + 0.7); ctx.lineTo(t.x1 - 0.5, t.y + 0.7); ctx.stroke();
+    glow((t.x0 + t.x1) / 2, t.y + 1, 10, t.room === 'engine' ? '255,180,130' : '160,220,230', 0.35);
+  }
+  if (power() && panelOk()) { glow(100, -16, 7, '90,255,170', 0.35); glow(101.5, -4, 7, '90,255,170', 0.3); }
+  if (!power() && darkT < RED_LIGHT_TIME) { glow(40, -35, 14, '255,50,40', 0.6 * strobe()); glow(-80, -44, 10, '255,50,40', 0.6 * strobe()); }
+  ctx.restore();
+}
+// Post: thick vignette + film grain, pre-rendered together as a few full-screen frames (rebuilt on resize)
+// and cycled at random: one plain blit per frame. (The blue-green grade rides along in the light map's multiply.)
+let postFrames = [];
+function postFX() {
+  const W = cv.width, H = cv.height;
+  if (!postFrames.length || postFrames[0].width !== W || postFrames[0].height !== H) {
+    postFrames = [];
+    for (let f = 0; f < 4; f++) {
+      const c = makeCanvas(W, H), g = c.getContext('2d');
+      const vg = g.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.72);
+      vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(0.6, 'rgba(0,0,0,0.35)'); vg.addColorStop(1, 'rgba(0,0,0,0.88)');
+      g.fillStyle = vg; g.fillRect(0, 0, W, H);
+      g.translate(-Math.random() * 256, -Math.random() * 256); g.fillStyle = TEX.grain; g.fillRect(0, 0, W + 256, H + 256);
+      postFrames.push(c);
+    }
+  }
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(postFrames[Math.floor(Math.random() * postFrames.length)], 0, 0);
+  ctx.restore();
+}
+// Graphics quality. HIGH = grain, bloom, marine snow, screen static. If frames are slow it drops to LOW on its own
+// (G switches manually, and turns the automatic switch off).
+let gfxHigh = true, gfxAuto = true, frameAvg = 16.7;
+function trackFrameTime(ms) {
+  if (ms > 250) return;                       // tab switch etc.
+  frameAvg += (ms - frameAvg) * 0.03;
+  if (gfxAuto && gfxHigh && runTime > 3 && frameAvg > 22) { gfxHigh = false; log('GRAPHICS: LOW (G TO SWITCH)', 'warn'); }
+}
+function toggleGfx() { gfxHigh = !gfxHigh; gfxAuto = false; log(`GRAPHICS: ${gfxHigh ? 'HIGH' : 'LOW'}`, 'good'); }
+// What you can't see: the engine room while its door is sealed, and (standing) everything behind your back.
+// Drawn after the lighting so no light or glow leaks through.
+const FOG = 'rgba(2,3,4,';
+function drawFog(M) {
+  ctx.save(); ctx.setTransform(M); ctx.translate(sub.x, sub.y); ctx.rotate(visAng());
+  waterSheen();
+  const hidden = 1 - clamp((hatch.progress - 0.05) / 0.35, 0, 1);
+  if (hidden > 0) { ctx.fillStyle = FOG + (0.97 * hidden) + ')'; ctx.fillRect(...ENGINE_ROOM); }
+  if (mode !== 'seated' && !sub.dead) {
+    const f = fig.face, x0 = fig.x - f * 4, x1 = fig.x - f * 32;
+    const gr = ctx.createLinearGradient(x0, 0, x1, 0); gr.addColorStop(0, FOG + '0)'); gr.addColorStop(1, FOG + '0.9)');
+    ctx.save(); roomsPathOn(ctx); ctx.clip(); ctx.fillStyle = gr;
+    if (f > 0) ctx.fillRect(-130, -70, x0 + 130, 140); else ctx.fillRect(x0, -70, 130 - x0, 140);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+// Low air: vision blurs and closes in. A tiny copy of the frame scaled back up is a cheap blur.
+let blurCv = null;
+function lowAirBlur(W, H) {
+  if (air >= LOW_AIR_BLUR || sub.dead) return;
+  const f = (LOW_AIR_BLUR - air) / LOW_AIR_BLUR, bw = Math.max(32, W >> 3), bh = Math.max(18, H >> 3);
+  if (!blurCv || blurCv.width !== bw || blurCv.height !== bh) blurCv = makeCanvas(bw, bh);
+  const g = blurCv.getContext('2d'); g.imageSmoothingEnabled = true; g.drawImage(cv, 0, 0, bw, bh);
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.imageSmoothingEnabled = true;
+  ctx.globalAlpha = Math.min(0.92, f * 1.3) * (0.85 + 0.15 * Math.sin(time * 2.2));   // breathing pulse
+  ctx.drawImage(blurCv, 0, 0, W, H);
+  if (postFrames.length) { ctx.globalAlpha = Math.min(1, f * 1.2); ctx.drawImage(postFrames[0], 0, 0, W, H); }   // tunnel vision
+  ctx.restore();
+}
+// Red emergency glow around the screen edges, pre-rendered per screen size
+let alarmCv = null;
+function alarmEdge(W, H) {
+  if (!alarmCv || alarmCv.width !== W || alarmCv.height !== H) {
+    alarmCv = makeCanvas(W, H); const g = alarmCv.getContext('2d');
+    const gr = g.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.7);
+    gr.addColorStop(0, 'rgba(255,0,0,0)'); gr.addColorStop(1, 'rgba(255,0,0,0.4)'); g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  }
+  return alarmCv;
+}
+// Low graphics: the vignette without grain, and only the four edge bands (the middle is skipped entirely)
+function postFXLow() {
+  const W = cv.width, H = cv.height;
+  if (!postFrames.length || postFrames[0].width !== W || postFrames[0].height !== H) postFX();   // builds the frames
+  const v = postFrames[0], bw = Math.round(W * 0.22), bh = Math.round(H * 0.22);
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(v, 0, 0, W, bh, 0, 0, W, bh); ctx.drawImage(v, 0, H - bh, W, bh, 0, H - bh, W, bh);
+  ctx.drawImage(v, 0, bh, bw, H - 2 * bh, 0, bh, bw, H - 2 * bh); ctx.drawImage(v, W - bw, bh, bw, H - 2 * bh, W - bw, bh, bw, H - 2 * bh);
+  ctx.restore();
+}
+// Marine snow: specks drifting in the water around the sub (pure atmosphere, no information)
+let snow = [];
+const SNOW_BOX = [1600, 1100];
+function updateSnow(dt) {
+  if (!snow.length) for (let i = 0; i < 220; i++) snow.push({ x: cam.x + (Math.random() - 0.5) * SNOW_BOX[0], y: cam.y + (Math.random() - 0.5) * SNOW_BOX[1], s: 0.5 + Math.random() * 1.4, v: 4 + Math.random() * 10, ph: Math.random() * 6 });
+  for (const f of snow) {
+    f.y += f.v * dt; f.x += Math.sin(time * 0.5 + f.ph) * 3 * dt;
+    if (f.x < cam.x - SNOW_BOX[0] / 2) f.x += SNOW_BOX[0]; if (f.x > cam.x + SNOW_BOX[0] / 2) f.x -= SNOW_BOX[0];
+    if (f.y < cam.y - SNOW_BOX[1] / 2) f.y += SNOW_BOX[1]; if (f.y > cam.y + SNOW_BOX[1] / 2) f.y -= SNOW_BOX[1];
+  }
+}
+function drawSnow() {
+  if (!gfxHigh) return;
+  ctx.fillStyle = 'rgba(150,185,195,0.22)';
+  for (const f of snow) ctx.fillRect(f.x, f.y, f.s, f.s);
+}
+
+// ===================== RENDER: MONITORS =====================
+function staticNoise(x, y, w, h) {
+  for (let i = 0; i < 160; i++) { ctx.fillStyle = `rgba(200,200,200,${Math.random() * 0.5})`; ctx.fillRect(x + Math.random() * w, y + Math.random() * h, 3, 2); }
+}
+// ----- Sonar look (Barotrauma-style): soft additive glow blobs that cool from cyan-green to blue as they age -----
+// Color ramps per return type: [fresh, middle, old]
+const DOT_RAMP = {
+  rock:     [[170, 255, 210], [60, 200, 255], [30, 70, 220]],
+  creature: [[255, 170, 110], [240, 70, 40], [140, 20, 40]],
+  relic:    [[255, 245, 160], [255, 200, 50], [170, 100, 10]],
+  scrap:    [[240, 245, 255], [160, 180, 230], [80, 90, 150]],
+  ruin:     [[235, 210, 150], [150, 200, 190], [60, 100, 140]],   // architecture: pale bone-white, so it reads apart from rock
+};
+const RAMP_STEPS = 10;
+const blobCache = {};
+// Pre-rendered soft round glow for a kind, age step and pixel size (cached at exact size so drawing it is a plain copy)
+function blobSprite(kind, step, px) {
+  const key = kind + step + '_' + px;
+  if (blobCache[key]) return blobCache[key];
+  const f = step / (RAMP_STEPS - 1), ramp = DOT_RAMP[kind];
+  const [a, b] = f < 0.5 ? [ramp[0], ramp[1]] : [ramp[1], ramp[2]], u = f < 0.5 ? f * 2 : (f - 0.5) * 2;
+  const c = a.map((v, i) => Math.round(v + (b[i] - v) * u));
+  const cv2 = document.createElement('canvas'); cv2.width = cv2.height = px;
+  const h = px / 2, g = cv2.getContext('2d'), gr = g.createRadialGradient(h, h, 0, h, h, h);
+  gr.addColorStop(0, `rgba(${c},1)`); gr.addColorStop(0.3, `rgba(${c},0.55)`); gr.addColorStop(1, `rgba(${c},0)`);
+  g.fillStyle = gr; g.fillRect(0, 0, px, px);
+  return blobCache[key] = cv2;
+}
+// Screen texture: fine grain + faint scanlines, cached per screen size
+let screenTex = null;
+function screenTexture(R) {
+  if (screenTex && screenTex.R === R) return screenTex.c;
+  const c = document.createElement('canvas'), n = Math.ceil(2 * R); c.width = c.height = n;
+  const g = c.getContext('2d'), img = g.createImageData(n, n);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const y = Math.floor(i / 4 / n), v = Math.random() * 40 + (y % 3 === 0 ? 18 : 0);
+    img.data[i] = v * 0.6; img.data[i + 1] = v; img.data[i + 2] = v * 0.9; img.data[i + 3] = 40;
+  }
+  g.putImageData(img, 0, 0);
+  screenTex = { R, c };
+  return c;
+}
+// The sonar screen's static parts, pre-rendered per size: the glass underneath (bezel, gradient, grain texture,
+// range rings) and the layer on top (edge vignette, beige rim, ticks). Two blits per frame instead of re-drawing.
+let sonarCache = null;
+function sonarLayers(R) {
+  if (sonarCache && sonarCache.R === R) return sonarCache;
+  const n = Math.ceil(2 * R + 40), c0 = n / 2;
+  const under = makeCanvas(n, n), g = under.getContext('2d');
+  g.fillStyle = '#121615'; g.beginPath(); g.arc(c0, c0, R + 18, 0, Math.PI * 2); g.fill();
+  g.strokeStyle = '#2c3330'; g.lineWidth = 3; g.stroke();
+  g.save(); g.beginPath(); g.arc(c0, c0, R, 0, Math.PI * 2); g.clip();
+  const bg = g.createRadialGradient(c0, c0, 0, c0, c0, R);
+  bg.addColorStop(0, '#16221d'); bg.addColorStop(0.7, '#0c1512'); bg.addColorStop(1, '#060a09');
+  g.fillStyle = bg; g.fillRect(c0 - R, c0 - R, 2 * R, 2 * R);
+  g.drawImage(screenTexture(R), c0 - R, c0 - R);
+  g.strokeStyle = 'rgba(150,200,180,0.07)'; g.lineWidth = 1; g.beginPath();
+  for (const f of [1 / 3, 2 / 3]) { g.moveTo(c0 + R * f, c0); g.arc(c0, c0, R * f, 0, Math.PI * 2); }
+  g.stroke(); g.restore();
+  const over = makeCanvas(n, n), h = over.getContext('2d');
+  h.save(); h.beginPath(); h.arc(c0, c0, R, 0, Math.PI * 2); h.clip();
+  const vg = h.createRadialGradient(c0, c0, R * 0.75, c0, c0, R);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.55)'); h.fillStyle = vg; h.fillRect(0, 0, n, n); h.restore();
+  h.strokeStyle = 'rgba(215,200,165,0.8)'; h.lineWidth = 2; h.beginPath(); h.arc(c0, c0, R, 0, Math.PI * 2); h.stroke();
+  h.strokeStyle = 'rgba(215,200,165,0.45)'; h.lineWidth = 1; h.beginPath();
+  for (let i = 0; i < 72; i++) {
+    const a = i * Math.PI / 36, l = i % 6 ? 6 : 12;
+    h.moveTo(c0 + Math.cos(a) * (R - 2), c0 + Math.sin(a) * (R - 2)); h.lineTo(c0 + Math.cos(a) * (R - 2 - l), c0 + Math.sin(a) * (R - 2 - l));
+  }
+  h.stroke();
+  return sonarCache = { R, n, under, over };
+}
+// Sonar returns: additive glow blobs drawn straight onto the screen. No buffer and no clip mask (both are
+// expensive full-screen-sized operations on machines that render the canvas on the CPU): dots too close
+// to the rim are simply skipped so nothing spills over it.
+function drawSonarGlow(S, cx, cy, R, k) {
+  const base = SONAR_BLOB * k * 2;
+  ctx.globalCompositeOperation = 'lighter';
+  for (const p of dots) {
+    const age = time - p.t, f = age / p.fade, [x, y] = S(p.x, p.y);
+    const sz = Math.max(4, Math.round(base * p.size * (age < 0.25 ? 1.5 - age * 2 : 1) / 2) * 2);   // fresh returns bloom
+    if (Math.hypot(x - cx, y - cy) > R - sz / 2) continue;
+    const step = Math.min(RAMP_STEPS - 1, Math.floor(f * RAMP_STEPS));
+    ctx.globalAlpha = p.bright * Math.pow(1 - f, 0.8) * SONAR_BLOB_ALPHA;
+    ctx.drawImage(blobSprite(p.kind, step, sz), Math.round(x - sz / 2), Math.round(y - sz / 2));
+  }
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+}
+function drawSonarScreen(L) {
+  const { cx, cy, R } = L, k = R / MURK_RADIUS;
+  const S = (x, y) => [cx + (x - sub.x) * k, cy + (y - sub.y) * k];
+  const SL = sonarLayers(R);
+  ctx.drawImage(SL.under, cx - SL.n / 2, cy - SL.n / 2);
+  if (power() && dots.length) drawSonarGlow(S, cx, cy, R, k);   // before the clip: it's pre-masked
+  ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
+  ctx.textAlign = 'center'; ctx.font = 'bold 16px monospace';
+  const s = mod('SONAR');
+  if (!power()) { ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(cx - R, cy - R, 2 * R, 2 * R); ctx.fillStyle = gen.boot > 0 ? '#5a5' : '#411'; ctx.fillText(gen.boot > 0 ? 'BOOTING...' : 'NO POWER', cx, cy); }
+  else {
+    // Where the sonar can aim from its slot, and where it's aimed
+    if (installed('SONAR')) {
+      const { o, faceA, aim } = sonarAim(), [ox, oy] = S(o.x, o.y);
+      ctx.fillStyle = 'rgba(120,220,255,0.035)';
+      ctx.beginPath(); ctx.moveTo(ox, oy); ctx.arc(ox, oy, R * 2, faceA - SONAR_PORT_ARC - PING_SPREAD / 2, faceA + SONAR_PORT_ARC + PING_SPREAD / 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(220,205,170,0.35)'; ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox + Math.cos(aim) * R * 2, oy + Math.sin(aim) * R * 2); ctx.stroke();
+    }
+    // Returns: additive glow blobs. Overlaps get brighter, so repeatedly pinged walls burn in.
+    // Drawn into an unclipped buffer first (per-draw clipping is slow), then copied onto the round screen once.
+    ctx.globalCompositeOperation = 'lighter';
+
+
+    // Outgoing wavefront (flickery) and returning echo specks
+    ctx.strokeStyle = SONAR_COLOR; ctx.lineWidth = 1;
+    for (const p of pings) {
+      const rad = (time - p.t) * SOUND_SPEED;
+      ctx.globalAlpha = 0.35 * (1 - 0.5 * rad / MURK_RADIUS);
+      ctx.beginPath();
+      for (let i = 0; i < p.rays.length - 1; i++) {
+        const a = p.rays[i], b = p.rays[i + 1];
+        if (rad > a.dist || rad > b.dist || Math.random() < SONAR_FLICKER) continue;
+        ctx.moveTo(...S(p.x + a.dx * rad, p.y + a.dy * rad)); ctx.lineTo(...S(p.x + b.dx * rad, p.y + b.dy * rad));
+      }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 0.35; ctx.fillStyle = SONAR_COLOR;
+    for (const ec of echoes) { const [x, y] = S(ec.x, ec.y); ctx.fillRect(x - 1, y - 1, 2, 2); }
+    // Faint static
+    if (gfxHigh) for (let i = 0; i < 18; i++) { ctx.globalAlpha = Math.random() * 0.25; ctx.fillStyle = '#4af'; ctx.fillRect(cx - R + Math.random() * 2 * R, cy - R + Math.random() * 2 * R, 2, 2); }
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+    // Own sub: thin pale outline, like the reference
+    ctx.strokeStyle = 'rgba(225,230,220,0.75)'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); HULL_OUTLINE.forEach((p, i) => { const w = subPoint(p), [x, y] = S(w.x, w.y); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.closePath(); ctx.stroke();
+    drawArm(S, k, 1.5); drawBalloons(S, k); drawHornWaves(S, k);
+    ctx.fillStyle = '#e44';
+    if (!sys.sonar) ctx.fillText('SONAR SWITCHED OFF  [1]', cx, cy - R * 0.55);
+    else if (s.slot < 0 || s.carried) { ctx.font = '12px monospace'; ctx.fillText('NO DIRECTIONAL MODULE - RMB STILL PINGS ALL AROUND', cx, cy - R * 0.55); ctx.font = 'bold 16px monospace'; }
+    else if (s.broken) ctx.fillText('SONAR MODULE BROKEN', cx, cy - R * 0.55);
+    if (phase === 'dock') { ctx.fillStyle = '#9cf'; ctx.fillText('DOCKED', cx, cy + R * 0.6); }
+  }
+  ctx.restore();
+  // Edge vignette, beige rim, ticks (cached)
+  ctx.drawImage(SL.over, cx - SL.n / 2, cy - SL.n / 2);
+  ctx.fillStyle = '#9ab'; ctx.font = '12px monospace'; ctx.textAlign = 'center';
+  ctx.fillText('WASD steer · LMB directional ping · RMB all-around ping · hold E arm · Q horn · F stand', cv.width / 2, cv.height - 12);
+}
+// The terminal is text that changes slowly, so it's rendered into an image ~10 times a second, not every frame
+let termCache = null;
+function drawTerminal(L) {
+  const key = `${L.tx}|${L.ty}|${L.tw}|${L.th}|${cv.width}|${cv.height}`;
+  if (!termCache || termCache.key !== key || time - termCache.t > 0.1 || time < termCache.t) {
+    const pad = 14, c = termCache && termCache.key === key ? termCache.c : makeCanvas(L.tw + 2 * pad, L.th + 2 * pad);
+    const keep = ctx; ctx = c.getContext('2d'); ctx.setTransform(1, 0, 0, 1, pad - L.tx, pad - L.ty); ctx.clearRect(L.tx - pad, L.ty - pad, c.width, c.height);
+    renderTerminal(L);
+    ctx = keep;
+    termCache = { key, c, t: time, pad, buttons: termButtons };
+  }
+  termButtons = termCache.buttons;
+  ctx.drawImage(termCache.c, L.tx - termCache.pad, L.ty - termCache.pad);
+}
+function renderTerminal(L) {
+  const { tx: x, ty: y, tw: w, th: h } = L;
+  ctx.fillStyle = '#26292e'; ctx.fillRect(x - 12, y - 12, w + 24, h + 24);
+  ctx.strokeStyle = '#4a4f57'; ctx.lineWidth = 2; ctx.strokeRect(x - 12, y - 12, w + 24, h + 24);
+  ctx.fillStyle = '#020a05'; ctx.fillRect(x, y, w, h);
+  termButtons = [];
+  if (!terminalAlive()) return;
+  ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+  ctx.textAlign = 'left'; ctx.font = '12px monospace';
+  let ly = y + 20;
+  const line = (t, c) => { ctx.fillStyle = c; ctx.fillText(t, x + 10, ly); ly += 16; };
+  line('ENGINE TERMINAL', '#5f9');
+  if (engine.report) {
+    const mal = engine.report === 'malfunction';
+    ctx.font = 'bold 26px monospace'; ctx.fillStyle = mal ? '#f33' : '#fc3';
+    ctx.fillText(mal ? 'X' : engine.report === 'prevention' ? '!' : '0', x + 10, ly + 14);
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText(mal ? 'ENGINE MALFUNCTION' : engine.report === 'prevention' ? 'ENGINE MALFUNCTION PREVENTION' : 'FUEL EXHAUSTED', x + 36, ly + 8);
+    ctx.font = '12px monospace'; ly += 26;
+  }
+  if (!power()) {
+    line(gen.boot > 0 ? `BOOTING ${gen.boot.toFixed(1)}s` : 'POWER: OFFLINE - BACKUP', gen.boot > 0 ? '#5a5' : '#e44');
+    rect([x + 10, ly - 10, (w - 20) * Math.max(0, 1 - darkT / TERMINAL_BACKUP), 8], '#fa3'); ly += 8;
+  } else line('POWER: ONLINE', '#4c8');
+  const pc = v => `${Math.round(v * 100)}%`;
+  line(`FUEL ${pc(fuel)}   AIR ${pc(air)}${airMaking() ? '' : ' (NOT MAKING AIR)'}`, fuel < 0.2 || air < 0.3 || !airMaking() ? '#e44' : '#4c8');
+  line(`WATER ${pc(water)}${water > ASCEND_LOCK ? ' (CAN\'T ASCEND)' : ''}   HULL ${sub.hp}/${MAX_HP}`, water > ASCEND_LOCK || sub.hp <= HIT_DAMAGE ? '#e44' : '#4c8');
+  ly += 4;
+  ['sonar', 'pump', 'lights'].forEach((id, i) => {
+    const bx = x + 10 + i * ((w - 20) / 3), bw = (w - 20) / 3 - 6;
+    ctx.fillStyle = sys[id] ? '#164' : '#311'; ctx.fillRect(bx, ly - 12, bw, 18);
+    ctx.fillStyle = sys[id] ? '#5f9' : '#a55'; ctx.fillText(`[${i + 1}] ${id.toUpperCase()} ${sys[id] ? 'ON' : 'OFF'}`, bx + 4, ly + 1);
+    termButtons.push({ id, x: bx, y: ly - 12, w: bw, h: 18 });
+  });
+  ly += 24;
+  // Horn: fires on compressed air, so it works without power (but not with a frozen panel)
+  {
+    const h = mod('HORN'), ok = h.slot >= 0 && !h.carried && !h.broken, bw = w - 20;
+    const live = ok && h.loaded > 0;
+    ctx.fillStyle = live ? '#432' : '#222'; ctx.fillRect(x + 10, ly - 12, bw, 18);
+    ctx.fillStyle = live ? '#fa4' : '#777';
+    ctx.fillText(`[Q] FIRE HORN  ${h.loaded > 0 ? 'LOADED' : 'EMPTY'} +${charges()}  ${!ok ? (h.broken ? 'MODULE BROKEN' : 'NOT INSTALLED') : SLOTS[h.slot].name + ' SIDE'}`, x + 14, ly + 1);
+    termButtons.push({ id: 'horn', x: x + 10, y: ly - 12, w: bw, h: 18 });
+    ly += 24;
+  }
+  if (pumpSpark > 0) line('PUMP RUNNING DRY!', Math.floor(time * 8) % 2 ? '#ff5' : '#e44');
+  // Slots
+  line('SLOTS: ' + SLOTS.map((s, i) => { const m = moduleIn(i); return `${s.name}=${m ? m.id + (m.broken ? '!' : '') : '-'}`; }).join(' '), '#8ca');
+  const bad = [];
+  if (parts.propeller.broken) bad.push('PROPELLER DEAD'); else if (parts.propeller.bumps) bad.push(`PROPELLER ${parts.propeller.bumps}/${PROP_BUMPS}`);
+  if (parts.panel.broken) bad.push('PANEL FROZEN'); else if (parts.panel.worn) bad.push('panel dmg');
+  if (parts.storage.broken) bad.push('STORAGE'); else if (parts.storage.worn) bad.push('storage dmg');
+  if (parts.pumpMech.dead) bad.push('PUMP GONE'); else if (parts.pumpMech.broken) bad.push('PUMP'); else if (parts.pumpMech.worn) bad.push('pump dmg');
+  if (arm.broken) bad.push('ARM'); else if (arm.hits) bad.push(`ARM ${arm.hits}/${ARM_MAX_HITS}`);
+  for (const m of modules) if (m.broken) bad.push(m.id + ' MODULE'); else if (m.worn) bad.push(m.id.toLowerCase() + ' dmg');
+  line(bad.length ? 'DAMAGE: ' + bad.join(', ') : 'DAMAGE: NONE', bad.length ? '#fa3' : '#4c8');
+  ly += 6; line('-- LOG --', '#5f9');
+  const room = Math.floor((y + h - ly) / 16);
+  for (const m of logLines.slice(-room)) line('> ' + m.t, m.c);
+  ctx.restore();
+}
+function snapshotMonitors() {
+  const off = document.createElement('canvas'); off.width = cv.width; off.height = cv.height;
+  const keep = ctx; ctx = off.getContext('2d');
+  const L = monitorLayout(); drawSonarScreen(L); drawTerminal(L);
+  ctx = keep; termButtons = [];
+  return off;
+}
+// Storage window: stored modules and stored items (grouped by type) as cards; click one to take it in your hand
+function drawInventory() {
+  const W = cv.width, H = cv.height;
+  const cards = [...modules.filter(m => m.slot < 0 && !m.carried).map(m => ({ m, label: m.id, sub: m.broken ? 'BROKEN' : 'MODULE', bad: m.broken })),
+                 ...Object.keys(ITEM_TYPES).filter(t => storedOf(t)).map(t => ({ type: t, label: `${ITEM_TYPES[t].short} x${storedOf(t)}`,
+                   sub: t === 'CHARGE' && storageLeaking() ? 'LEAKING!' : t === 'CHARGE' && storedCharges().some(c => c.gas < 0.99) ? 'ONE PART EMPTY' : ITEM_TYPES[t].name,
+                   bad: t === 'CHARGE' && storageLeaking() }))];
+  const cw = 100, w = Math.max(420, 28 + cards.length * (cw + 10)), h = 210, x = (W - w) / 2, y = (H - h) / 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, W, H);
+  rect([x, y, w, h], '#2a1f10', '#a0601a');
+  ctx.textAlign = 'left'; ctx.font = 'bold 14px monospace'; ctx.fillStyle = '#ffb040'; ctx.fillText('STORAGE', x + 14, y + 24);
+  ctx.font = '12px monospace'; ctx.fillStyle = '#ddd'; ctx.fillText(`SPARE PARTS + GAS ${storedParts()}/${MAX_PARTS}    HORN CHARGES ${charges()}`, x + 14, y + 44);
+  invButtons = [];
+  cards.forEach((c, i) => {
+    const bx = x + 14 + i * (cw + 10), by = y + 62;
+    rect([bx, by, cw, 100], c.m ? MODULE_COLORS[c.m.id] : '#1c1a16', c.bad ? '#f33' : '#9a8a6a');
+    // Item / module picture, drawn at card scale
+    ctx.save(); ctx.translate(bx + cw / 2, by + 34); ctx.scale(3.2, 3.2);
+    if (c.type) drawItemIcon(c.type, 0, 0); else { rect([-7, -3, 14, 6], MODULE_COLORS[c.m.id], '#9fc'); }
+    ctx.restore();
+    ctx.textAlign = 'center'; ctx.fillStyle = '#e8e0cc'; ctx.font = 'bold 12px monospace'; ctx.fillText(c.label, bx + cw / 2, by + 74);
+    ctx.font = '9px monospace'; ctx.fillStyle = c.bad ? '#f66' : '#9a9080'; ctx.fillText(c.sub, bx + cw / 2, by + 90);
+    invButtons.push({ ...c, x: bx, y: by, w: cw, h: 100 });
+  });
+  ctx.textAlign = 'left';
+  if (!cards.length) { ctx.fillStyle = '#888'; ctx.fillText('empty', x + 14, y + 110); }
+  ctx.fillStyle = '#aaa'; ctx.font = '12px monospace'; ctx.fillText('click something to take it in your hand   -   E / click outside to close', x + 14, y + h - 14);
+}
+// The repair minigame window (screen space, low over the middle of the screen)
+function drawFix() {
+  if (!fix) return;
+  const L = fixLayout(), { x, y, w, h, tx, tw } = L;
+  ctx.save();
+  rect([x, y, w, h], 'rgba(16,14,11,0.94)', fix.miss > 0 ? '#f44' : '#a0601a');
+  ctx.textAlign = 'center'; ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#ffb040';
+  ctx.fillText(`REPAIR: ${fix.name}`, x + w / 2, y + 20);
+  ctx.font = '11px monospace'; ctx.fillStyle = '#bbb';
+  ctx.fillText({ rivet: 'E / CLICK WHEN THE MARKER IS IN THE GREEN', screw: 'CIRCLE THE MOUSE CLOCKWISE AROUND THE NUT',
+                 filter: 'MOUSE: LINE IT UP UNDER THE GAP   HOLD E: PUSH' }[fix.game], x + w / 2, y + 37);
+  if (fix.game === 'rivet') {
+    // The patch plate and its rivets, then the timing bar
+    rect([x + w / 2 - fix.total * 19 - 6, y + 50, fix.total * 38 + 12, 40], fix.flash > 0 ? '#8a8270' : '#5a554a', '#2a2620');
+    for (let i = 0; i < fix.total; i++) {
+      const cx = x + w / 2 + (i - (fix.total - 1) / 2) * 38, cy = y + 70, done = i < fix.prog, cur = i === Math.floor(fix.prog);
+      ctx.beginPath(); ctx.arc(cx, cy, 9, 0, Math.PI * 2);
+      ctx.fillStyle = done ? '#c9c2b0' : '#141210'; ctx.fill();
+      ctx.lineWidth = cur ? 2 : 1; ctx.strokeStyle = cur ? `rgba(255,176,64,${0.5 + 0.5 * Math.sin(time * 8)})` : '#3a352d'; ctx.stroke();
+      if (done) { ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.beginPath(); ctx.arc(cx - 3, cy - 3, 2.5, 0, Math.PI * 2); ctx.fill(); }
+    }
+    const by = y + 104;
+    rect([tx, by, tw, 16], '#1c1c1c', '#555');
+    rect([tx + (fix.zone - RIVET_ZONE / 2) * tw, by, RIVET_ZONE * tw, 16], '#2d7a3a');
+    rect([tx + fix.pos * tw - 2, by - 5, 4, 26], fix.miss > 0 ? '#f44' : '#fff');
+    ctx.fillStyle = '#aaa'; ctx.fillText(`RIVET ${Math.min(fix.prog + 1, fix.total)}/${fix.total}`, x + w / 2, by + 36);
+  } else if (fix.game === 'screw') {
+    // A pipe joint: the nut turns as you circle the mouse; a ring shows how tight it is
+    const { nx, ny } = L;
+    rect([tx, ny - 8, tw, 16], '#3e4a52', '#1c2226');
+    if (fix.prog < 1) { ctx.fillStyle = 'rgba(150,200,220,0.6)'; for (let i = 0; i < 8; i++) { const k = (time * 3 + i / 8) % 1; ctx.fillRect(nx + 26 + k * 40 * (1 - fix.prog), ny - 10 - k * 18 + Math.sin(i * 7) * 6, 2, 2); } }
+    ctx.lineWidth = 6; ctx.strokeStyle = '#2a2a2a'; ctx.beginPath(); ctx.arc(nx, ny, 38, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = '#4c8'; ctx.beginPath(); ctx.arc(nx, ny, 38, -Math.PI / 2, -Math.PI / 2 + fix.prog * Math.PI * 2); ctx.stroke();
+    ctx.save(); ctx.translate(nx, ny); ctx.rotate(fix.prog * SCREW_TURNS * Math.PI * 2);
+    ctx.beginPath(); for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3; ctx.lineTo(Math.cos(a) * 22, Math.sin(a) * 22); } ctx.closePath();
+    ctx.fillStyle = '#8a8f94'; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = '#2a2e32'; ctx.stroke();
+    ctx.fillStyle = '#2a2e32'; ctx.fillRect(-2, -20, 4, 8);   // a mark so you can see it turn
+    ctx.beginPath(); ctx.arc(0, 0, 8, 0, Math.PI * 2); ctx.fillStyle = '#3e4a52'; ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = '#aaa'; ctx.fillText(`${Math.round(fix.prog * 100)}% TIGHT`, x + w / 2, y + h - 26);
+  } else {
+    // The filter housing: a gap in the rail drifts about; the cartridge follows the mouse and rises as you push
+    const ry = y + 52, gx = tx + fix.guide * tw, cw = 2 * FILTER_SLACK * tw * 0.8;
+    rect([tx, ry, tw, 10], '#3a3a3a', '#222');
+    rect([gx - cw / 2, ry, cw, 10], '#050505'); rect([gx - cw / 2 - 2, ry - 3, 2, 16], '#4c8'); rect([gx + cw / 2, ry - 3, 2, 16], '#4c8');
+    const fxp = tx + fix.fx * tw, fy = ry + 14 + (1 - fix.prog) * 46;
+    ctx.save(); ctx.translate(fxp, fy);
+    rect([-cw / 2 + 3, 0, cw - 6, 30], '#3f5a4a', fix.on ? '#4c8' : '#f55');
+    ctx.strokeStyle = 'rgba(190,230,200,0.4)'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let i = -cw / 2 + 8; i < cw / 2 - 4; i += 6) { ctx.moveTo(i, 3); ctx.lineTo(i, 27); } ctx.stroke();
+    ctx.restore();
+    rect([tx, y + h - 36, tw, 6], '#222'); rect([tx, y + h - 36, tw * fix.prog, 6], '#4c8');
+  }
+  ctx.font = '10px monospace'; ctx.fillStyle = '#777';
+  ctx.fillText('A/D or ESC: STOP (PROGRESS IS KEPT)', x + w / 2, y + h - 10);
+  ctx.restore();
+}
+// Little pictures of the loose items (sub-local units, centred on x, y)
+function drawItemIcon(type, x, y) {
+  ctx.save(); ctx.translate(x, y); ctx.lineWidth = 0.4; ctx.strokeStyle = '#0a0c0e';
+  if (type === 'PIPE') {        // compression pipe: a short pipe section with flanges
+    ctx.fillStyle = '#6d7c86'; ctx.fillRect(-4, -1.2, 8, 2.4); ctx.strokeRect(-4, -1.2, 8, 2.4);
+    ctx.fillStyle = '#3d4a52'; ctx.fillRect(-4.6, -1.8, 1.2, 3.6); ctx.fillRect(3.4, -1.8, 1.2, 3.6);
+    ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.fillRect(-3.4, -0.7, 6.8, 0.5);
+  } else if (type === 'FILTER') { // air filter: a cartridge with a mesh
+    ctx.fillStyle = '#3f5a4a'; ctx.fillRect(-2.6, -2.6, 5.2, 5.2); ctx.strokeRect(-2.6, -2.6, 5.2, 5.2);
+    ctx.strokeStyle = 'rgba(190,230,200,0.5)'; ctx.beginPath();
+    for (let i = -1.6; i <= 1.6; i += 0.8) { ctx.moveTo(i, -2); ctx.lineTo(i, 2); ctx.moveTo(-2, i); ctx.lineTo(2, i); } ctx.stroke();
+  } else if (type === 'METAL') {  // a piece of metal: bent plate with bolt holes
+    ctx.fillStyle = '#7a7268'; ctx.beginPath(); ctx.moveTo(-3.5, 1.5); ctx.lineTo(-2.5, -1.8); ctx.lineTo(3.2, -1.2); ctx.lineTo(3.6, 1.8); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#1a1816'; for (const [bx, by] of [[-1.8, 0], [2, 0.3]]) { ctx.beginPath(); ctx.arc(bx, by, 0.45, 0, Math.PI * 2); ctx.fill(); }
+  } else if (type === 'GAS') {    // gas canister: a red jerrycan with a spout
+    ctx.fillStyle = '#8a2a1e'; ctx.fillRect(-2.6, -2.4, 5.2, 5.4); ctx.strokeRect(-2.6, -2.4, 5.2, 5.4);
+    ctx.strokeStyle = 'rgba(255,200,180,0.35)'; ctx.beginPath(); ctx.moveTo(-2, -1.6); ctx.lineTo(2, 2.4); ctx.moveTo(2, -1.6); ctx.lineTo(-2, 2.4); ctx.stroke();
+    ctx.fillStyle = '#3a3a3a'; ctx.fillRect(1, -3.6, 1.2, 1.2); ctx.fillRect(-2, -3.2, 2.2, 0.8);
+  } else {                       // shockwave charge: a steel compressed-air bottle with a valve
+    ctx.fillStyle = '#5a6a76'; ctx.fillRect(-1.6, -3, 3.2, 6); ctx.strokeRect(-1.6, -3, 3.2, 6);
+    ctx.fillStyle = '#d0a040'; ctx.fillRect(-1.6, -1, 3.2, 0.7);
+    ctx.fillStyle = '#4a4a4a'; ctx.fillRect(-0.6, -4.2, 1.2, 1.2);
+  }
+  ctx.restore();
+}
+
+// ===================== TITLE, CONTROLS, FIRST-TIME TIPS =====================
+let title = location.hash !== '#play', showDebug = false;
+function startGame() { title = false; initAudio(); }
+const CONTROLS = [
+  ['SEATED (AT THE CHAIR)', [['W A S D', 'steer'], ['LMB', 'directional sonar ping'], ['RMB', 'all-around sonar ping'], ['E (hold)', 'robot arm grabs where you aim'],
+                             ['Q', 'horn (fires its loaded charge)'], ['1  2  3', 'sonar / pump / lights'], ['SPACE', 'dive (at the dock)'], ['F', 'stand up']]],
+  ['STANDING', [['A / D', 'walk'], ['MOUSE', 'your hand'], ['LMB', 'grab / click'], ['E', 'use / repair'], ['F', 'sit (by the chair)'], ['ESC', 'close / stop']]],
+  ['ANYTIME', [['H', 'buy hull (dock)'], ['P', 'pay quota (dock)'], ['TAB', 'show controls'], ['ENTER', 'dismiss a tip'], ['M', 'sound on / off'], ['G', 'graphics high / low'], ['`', 'debug readout']]],
+];
+function drawControls(y) {
+  const W = cv.width, cw = Math.min(300, (W - 64) / 3), x0 = (W - cw * 3) / 2;
+  ctx.textAlign = 'left';
+  CONTROLS.forEach(([head, rows], c) => {
+    const x = x0 + c * cw;
+    ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#ffb040'; ctx.fillText(head, x, y);
+    ctx.font = '12px monospace';
+    rows.forEach(([k, v], i) => { ctx.fillStyle = '#e8e0cc'; ctx.fillText(k, x, y + 24 + i * 19); ctx.fillStyle = '#9aa'; ctx.fillText(v, x + 82, y + 24 + i * 19); });
+  });
+}
+function drawTitle() {
+  const W = cv.width, H = cv.height;
+  ctx.fillStyle = 'rgba(1,4,8,0.9)'; ctx.fillRect(0, 0, W, H);
+  const y = Math.max(40, H / 2 - 230);
+  ctx.textAlign = 'center'; ctx.font = 'bold 54px monospace'; ctx.fillStyle = '#9fe6e0';
+  ctx.shadowColor = '#3cc'; ctx.shadowBlur = 24; ctx.fillText('ATLANTIS SUB', W / 2, y + 50); ctx.shadowBlur = 0;
+  ctx.font = '14px monospace'; ctx.fillStyle = '#bcc';
+  ctx.fillText("You're the whole crew. Loot Atlantis, keep this tin can alive, make quota.", W / 2, y + 86);
+  ctx.fillStyle = '#788'; ctx.fillText('Sonar is your only eyes. Everything breaks. Nobody is coming.', W / 2, y + 108);
+  drawControls(y + 160);
+  ctx.textAlign = 'center'; ctx.font = 'bold 16px monospace'; ctx.fillStyle = `rgba(255,176,64,${0.6 + 0.4 * Math.sin(performance.now() / 300)})`;
+  ctx.fillText('CLICK TO START', W / 2, y + 360);
+  ctx.font = '11px monospace'; ctx.fillStyle = '#566'; ctx.fillText('headphones recommended', W / 2, y + 382);
+}
+// Tips: each one shows once (this browser remembers), the first time its situation comes up
+const TIPS = {
+  dock: 'DOCKED. You get 60 s of free repairs here. SPACE dives. Go deeper than 50 m, then come back up to the top to finish a dive. The quota is due every 3 dives.',
+  dock2: 'BACK AT THE DOCK. The hull gets patched for free, but only up to about half. H buys more hull, P pays toward the quota. Broken stuff: stand up and hold E on it (free here).',
+  dive: 'SONAR IS YOUR ONLY EYES. RMB: all-around ping (rough). LMB: directional ping from the sonar module (sharp, but only where its slot faces). WASD steers, F stands you up.',
+  stand: 'STANDING. A/D walk, the mouse is your hand. LMB grabs and clicks, E uses. You only see the way you face. F sits you back down at the chair.',
+  loot: 'YELLOW BLIP = LOOT. Hold E and point at it on the sonar: the arm grabs it. Relics float up on a balloon and pay out. Scrap gets dropped inside.',
+  creature: 'SOMETHING BIG ON SONAR. Touching it wrecks the engine. The horn shoves it away (Q), but the HORN module starts in storage: install it in a slot first.',
+  reload: 'HORN EMPTY. It holds one charge. Reload it by hand: take a CHARGE from storage, touch the horn module, hold E.',
+  damaged: "SOMETHING'S DAMAGED (check the terminal). Stand up, open the storage (orange, top right), take the matching part, touch the broken thing, press E. PIPE = pump, FILTER = air generator, METAL = the rest.",
+  floor: 'SCRAP ON THE FLOOR. Stand up, click it to pick it up, click the storage to stow it. Loose parts slide around when the sub tilts.',
+  malfunction: 'MALFUNCTION: the engine room is flooded behind its door. Open it and that water pours into the cabin, so get the pump running first (2 at the terminal).',
+  engine: "ENGINE'S OFF. Walk to the back, spin the yellow wheel (hold LMB, circle the mouse) to open the bay, touch the engine, press E.",
+  water: "WATER COMING IN. Pump it out (2 at the terminal, the pump only works in the floor slot). Over 40% shorts the terminal. Don't let the pump run dry: it blows up.",
+  power: "POWER'S OUT. The terminal dies in 7 s, the lights in 30 s, and without the air generator you have about a minute of air.",
+  air: 'AIR FALLING. The air generator needs power and a slot. The crank on the wall (circle the mouse on it) slows the loss. A CHARGE is compressed air: hold one and hold E for +15% air (but that is a horn blast gone).',
+  frozen: "PANEL FROZEN. Everything's stuck the way it was, throttle too. Cut the power at the breaker in the engine bay, then fix the panel with a METAL part.",
+  storage: 'STORAGE BROKEN. The horn charges inside are leaking out and will be empty in seconds. Open it and carry them out, one at a time. Patch it with a METAL part.',
+  fuel: "FUEL LOW. Pour a GAS CANISTER into the engine (hold it, touch the engine, hold E) for +33%. No gas left? Head up.",
+};
+let tipSeen = {}, tipQueue = [], tipNow = null, tipClock = 0;
+try { tipSeen = JSON.parse(localStorage.getItem('atlantisSubTips') || '{}'); } catch (e) {}
+function showTip(id) {
+  if (tipSeen[id] || tipQueue.some(q => q.id === id) || (tipNow && tipNow.id === id)) return;
+  tipQueue.push({ id, at: time });
+}
+function dismissTip() { if (tipNow) tipNow.t = Math.min(tipNow.t, 0.3); }
+function checkTips() {
+  if (sub.dead) return;
+  if (phase === 'dock') showTip(divesDone ? 'dock2' : 'dock');
+  if (phase !== 'dive') return;
+  showTip('dive');
+  if (mode === 'standing') showTip('stand');
+  if (Object.values(parts).some(p => p.worn || p.broken) || modules.some(m => m.worn || m.broken)) showTip('damaged');
+  if (items.some(i => i.where === 'floor')) showTip('floor');
+  if (engine.state === 'off' && engine.report === 'malfunction') showTip('malfunction');
+  if (engine.state === 'off' && engine.report !== 'fuel') showTip('engine');
+  if (water > 0.12) showTip('water');
+  if (!power()) showTip('power');
+  if (air < 0.6 && !airMaking()) showTip('air');
+  if (parts.panel.broken) showTip('frozen');
+  if (parts.storage.broken) showTip('storage');
+  if (fuel < 0.25) showTip('fuel');
+  if (mod('HORN').loaded <= 0 && mod('HORN').slot >= 0) showTip('reload');
+}
+function updateTips(dt) {
+  if ((tipClock -= dt) <= 0) { checkTips(); tipClock = 0.25; }
+  if (tipNow && tipNow.id.startsWith('dock') && phase === 'dive') tipNow.t = Math.min(tipNow.t, 0.3);   // left the dock
+  if (tipNow && (tipNow.t -= dt) <= 0) tipNow = null;
+  tipQueue = tipQueue.filter(q => time - q.at < 15 && !tipSeen[q.id]);   // stale ones (the moment passed) wait for next time
+  if (!tipNow && tipQueue.length) {
+    const id = tipQueue.shift().id;
+    tipNow = { id, text: TIPS[id], t: 5 + TIPS[id].length / 22, age: 0 };
+    tipSeen[id] = true;
+    try { localStorage.setItem('atlantisSubTips', JSON.stringify(tipSeen)); } catch (e) {}
+  }
+  if (tipNow) tipNow.age += dt;
+}
+function wrapText(text, maxW) {
+  const out = []; let line = '';
+  for (const w of text.split(' ')) { const t = line ? line + ' ' + w : w; if (ctx.measureText(t).width > maxW && line) { out.push(line); line = w; } else line = t; }
+  if (line) out.push(line);
+  return out;
+}
+function drawTip() {
+  if (!tipNow || sub.dead) return;
+  const W = cv.width, w = Math.min(600, Math.max(380, W - 700)), x = (W - w) / 2, y = mode === 'seated' ? 54 : 70;
+  ctx.font = '12px monospace'; const lines = wrapText(tipNow.text, w - 28), h = 30 + lines.length * 16;
+  ctx.save(); ctx.globalAlpha = Math.min(1, tipNow.age * 4, tipNow.t * 2);
+  rect([x, y, w, h], 'rgba(12,16,18,0.92)', '#a0601a');
+  ctx.textAlign = 'left'; ctx.fillStyle = '#ffb040'; ctx.font = 'bold 11px monospace'; ctx.fillText('TIP', x + 14, y + 16);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#666'; ctx.font = '10px monospace'; ctx.fillText('ENTER: OK', x + w - 12, y + 16);
+  ctx.textAlign = 'left'; ctx.font = '12px monospace'; ctx.fillStyle = '#dde';
+  lines.forEach((l, i) => ctx.fillText(l, x + 14, y + 34 + i * 16));
+  ctx.restore();
+}
+const DEATH_HINTS = {
+  'SUFFOCATED': 'the air generator needs power and a slot; the crank and venting a horn charge buy you time',
+  'FLOODED': 'run the pump early, and keep the bay door shut after a malfunction until the pump is going',
+  'HULL IMPLODED': 'slow down near walls, and buy hull at the dock (H)',
+  'QUOTA MISSED': 'pay the quota at the dock (P); the ruins at the bottom pay the most',
+};
+
+// ===================== RENDER =====================
+function bar(x, y, w, f, c, t) {
+  ctx.fillStyle = '#222'; ctx.fillRect(x, y, w, 10);
+  ctx.fillStyle = c; ctx.fillRect(x, y, w * clamp(f, 0, 1), 10);
+  ctx.strokeStyle = '#888'; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, w, 10);
+  ctx.fillStyle = '#ddd'; ctx.font = '11px monospace'; ctx.textAlign = 'left'; ctx.fillText(t, x + w + 6, y + 9);
+}
+function draw() {
+  const W = cv.width, H = cv.height, e = zoomEase();
+  const monitorsOnly = mode === 'seated' && zoomT === 0 && !sub.dead;   // monitors cover the view: skip the scene
+  ctx.fillStyle = monitorsOnly ? '#020509' : '#04101f'; ctx.fillRect(0, 0, W, H);
+  if (!monitorsOnly) drawScene(W, H, e);
+  drawOverlays(W, H);
+  if (title) drawTitle();
+  else if (keys.Tab) { ctx.fillStyle = 'rgba(1,4,8,0.85)'; ctx.fillRect(0, 0, W, H); drawControls(Math.max(60, H / 2 - 100)); }
+}
+function drawScene(W, H, e) {
+  const sk = shakeAmp * (shake / SHAKE_TIME) * (1 + 1.5 * e);
+  ctx.save();
+  ctx.translate(W / 2 + (Math.random() - 0.5 + shakeBias * 0.4) * 2 * sk, H / 2 + (Math.random() - 0.5) * 2 * sk);
+  ctx.scale(viewScale, viewScale);
+  ctx.translate(-cam.x, -cam.y);
+  const M = ctx.getTransform();   // world transform, reused by the light map
+  const I = (x, y) => [x, y]; // world coords as-is
+  drawSnow();
+  drawRail(I, 1);
+  ctx.globalAlpha = 1 - (1 - DIM_STANDING) * e;   // outside dims when standing
+  drawBalloons(I, 1); drawArm(I, 1, 2 / viewScale); drawHornWaves(I, 1 / viewScale);
+  ctx.globalAlpha = 1;
+  drawSub();
+  ctx.restore();
+  applyLighting(M, frameDt);
+  drawFog(M);
+  if (gfxHigh) postFX(); else postFXLow();
+}
+// Everything drawn over the scene: red alarm edges, monitors, storage window, HUD
+function drawOverlays(W, H) {
+  if (redLight()) ctx.drawImage(alarmEdge(W, H), 0, 0);
+  if (mode === 'seated' && !sub.dead) {
+    if (zoomT > 0) { ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(0, 0, W, H); }
+    const L = monitorLayout();
+    if (parts.panel.broken && snapshot && terminalAlive()) {
+      ctx.drawImage(snapshot, 0, 0); termButtons = [];
+      ctx.fillStyle = '#f44'; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('PANEL FROZEN', L.cx, L.cy - L.R - 24);
+    } else if (parts.panel.broken) { drawSonarScreen(L); drawTerminal(L); termButtons = []; }
+    else { drawSonarScreen(L); drawTerminal(L); }
+  }
+  if (inv.open) drawInventory();
+  drawFix();
+  lowAirBlur(W, H);
+
+  bar(16, 14, 160, sub.hp / MAX_HP, sub.hp <= HIT_DAMAGE ? '#e44' : '#4c8', `HULL ${sub.hp}`);
+  bar(16, 30, 160, fuel, fuel < 0.2 ? '#e44' : '#db5', `FUEL ${Math.round(fuel * 100)}%`);
+  bar(16, 46, 160, air, air < 0.3 || !airMaking() ? '#e44' : '#9df', `AIR ${Math.round(air * 100)}%${airMaking() || phase === 'dock' ? '' : '  FALLING'}`);
+  bar(16, 62, 160, water, water > ASCEND_LOCK ? '#e44' : '#48f', `WATER ${Math.round(water * 100)}%`);
+  bar(16, 78, 160, Math.hypot(throttle.x, throttle.y), '#c8c', `THROTTLE (weight x${mass().toFixed(2)})`);
+  ctx.font = '13px monospace'; ctx.textAlign = 'left';
+  ctx.fillStyle = RELIC_COLOR; ctx.fillText(`COINS ${coins}`, 16, 110);
+  ctx.fillStyle = '#ddd';
+  const left = DIVES_PER_QUOTA - (divesDone % DIVES_PER_QUOTA);
+  ctx.fillText(`QUOTA ${paid}/${quota}  due in ${left} dive${left > 1 ? 's' : ''}`, 16, 128);
+  ctx.fillText(`PARTS: METAL ${storedOf('METAL')}  PIPE ${storedOf('PIPE')}  FILTER ${storedOf('FILTER')}`, 16, 146);
+  ctx.fillText(`GAS ${storedOf('GAS')}  CHARGES ${charges()}  `, 16, 164);
+  const hl = mod('HORN').loaded > 0; ctx.fillStyle = hl ? '#fa4' : '#e44';
+  ctx.fillText(hl ? 'HORN LOADED' : 'HORN EMPTY', 16 + ctx.measureText(`GAS ${storedOf('GAS')}  CHARGES ${charges()}  `).width, 164);
+  ctx.fillStyle = arm.broken ? '#e44' : arm.hits ? '#fa3' : '#4c8';
+  ctx.fillText(arm.broken ? 'ARM BROKEN' : arm.hits ? 'ARM HIT' : 'ARM OK', 16, 182);
+
+  ctx.textAlign = 'center'; ctx.font = 'bold 14px monospace';
+  if (phase === 'dock') {
+    ctx.fillStyle = '#9cf';
+    ctx.fillText(`DOCKED - FREE REPAIRS ${Math.ceil(dockT)}s - SPACE (seated) to dive - H: hull +${HIT_DAMAGE} (${HULL_HIT_COST}c) - B: gas can (${GAS_COST}c) - P: pay quota`, W / 2, 20);
+  } else { ctx.fillStyle = '#7ab'; ctx.fillText(`DIVE ${divesDone + 1}   DEPTH ${(sub.y / 10).toFixed(0)} m`, W / 2, 20); }
+  ctx.fillStyle = mode === 'seated' ? '#9cf' : '#fc6';
+  ctx.fillText(mode === 'seated' ? 'SEATED' : 'STANDING', W / 2, 40);
+  if (mode === 'standing') {
+    const t = handTarget();
+    const hint = fix ? 'REPAIRING' : grip ? (grip.id === 'wheel' ? `CIRCLE THE MOUSE - BAY ${Math.round(hatch.progress * 100)}% OPEN` : 'CIRCLE THE MOUSE TO CRANK AIR')
+      : t ? t.hint : canSit() ? 'F: SIT' : (fig.x >= SIT_RANGE[0] && fig.x <= SIT_RANGE[1] && seatUnderWater()) ? 'THE SEAT IS UNDER WATER - PUMP IT OUT' : 'A/D: WALK   MOUSE: HAND   E: USE   LMB: GRAB';
+    ctx.font = '12px monospace'; ctx.fillStyle = '#ccc'; ctx.fillText(hint, W / 2, 58);
+  }
+  ctx.font = '12px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = '#7ab';
+  const dbg = [`SPD ${Math.hypot(sub.vx, sub.vy).toFixed(0)}`, `CREATURE ${(Math.hypot(sub.x - creature.x, sub.y - creature.y) / 10).toFixed(0)} m`,
+    `MODE ${mode}  FIG ${fig.x.toFixed(0)} face ${fig.face}`, `ENGINE ${engine.state}${engine.report ? ' ' + engine.report : ''}`, `RUN ${runTime.toFixed(0)}s  QUOTAS ${quotasMet}`, `GFX ${gfxHigh ? 'HIGH' : 'LOW'} (G)  ${(1000 / frameAvg).toFixed(0)} fps`];
+  if (showDebug) dbg.forEach((t, i) => ctx.fillText(t, W - 12, 18 + i * 16));
+  else { ctx.fillStyle = '#566'; ctx.fillText(`TAB: CONTROLS${muted ? '   SOUND OFF' : ''}`, W - 12, 18); }
+  drawTip();
+
+  if (sub.dead) {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, H / 2 - 60, W, 110);
+    ctx.textAlign = 'center'; ctx.fillStyle = '#f44'; ctx.font = 'bold 36px monospace';
+    ctx.fillText(`SUNK: ${failReason}`, W / 2, H / 2 - 15);
+    ctx.font = '15px monospace'; ctx.fillStyle = '#fff';
+    ctx.fillText(`lasted ${Math.floor(runTime / 60)}:${String(Math.floor(runTime % 60)).padStart(2, '0')}  -  quotas met: ${quotasMet}  -  press R to start over`, W / 2, H / 2 + 20);
+    if (DEATH_HINTS[failReason]) { ctx.fillStyle = '#9aa'; ctx.font = '12px monospace'; ctx.fillText(`next time: ${DEATH_HINTS[failReason]}`, W / 2, H / 2 + 42); }
+  }
+}
+
+// ===================== LOOP =====================
+let last = performance.now(), frameDt = 1 / 60;
+function frame(now) {
+  trackFrameTime(now - last);
+  const dt = Math.min((now - last) / 1000, 1 / 30);
+  last = now;
+  frameDt = dt;
+  if (!title) { update(dt); updateTips(dt); }
+  updateAudio(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+resize(); buildTextures(); reset(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>
