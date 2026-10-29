@@ -86,8 +86,8 @@ const SCREW_TURNS      = 2.5;  // PIPE: circle the mouse clockwise this many tur
 const FILTER_TIME      = 3.0;  // FILTER: seconds of pushing (hold E) with the cartridge lined up under the guide
 const FILTER_SLACK     = 0.12; // how far off the guide (fraction of the track) still slides in
 const DOCK_REPAIR_TIME = 1.5;  // free while docked
-const MAX_PARTS        = 6;    // spare parts + gas canisters the storage holds (horn charges have their own rack)
-const START_PARTS      = ['METAL', 'PIPE', 'FILTER'];   // in storage at the start of a run
+const MAX_ITEM_TYPES   = 6;    // how many KINDS of item the storage carries (quantities are unlimited). There are 7 kinds, so one is always left behind
+const START_LOADOUT    = { METAL: 3, COPPER: 2, FILTER: 1, PIPE: 1, TRANSDUCER: 1, GAS: 2 };   // in storage at the start of a run (testing loadout)
 const SCRAP_MIX        = ['METAL', 'METAL', 'PIPE', 'FILTER'];   // what a piece of scrap turns out to be (random pick)
 const ITEM_SLIDE       = 140;  // px/s^2 loose items slide per radian of tilt
 const LOW_AIR_BLUR     = 0.55; // below this much air your vision starts to blur
@@ -153,8 +153,18 @@ const CHARGE_LEAK     = [5, 8];// broken storage: every stored charge bleeds emp
 // Gas canisters (gasoline): pour one into the engine for fuel
 const GAS_FUEL        = 0.33;  // fuel per canister
 const POUR_TIME       = 2.0;   // hold E on the engine with a canister in your hand
-const START_GAS       = 1;     // in storage at the start of a run
 const GAS_COST        = 60;    // coins for another one at the dock (B)
+// Failures, codes and wiring (see the FAILURES section and the handbook, J)
+const WIRE_WET_TIME   = 12;    // seconds of water touching a wire to go from dry to soaked (C-71)
+const WIRE_DRY_TIME   = 45;    // seconds for a wire to dry out completely once the water's gone
+const WIRE_FLICKER_AT = 0.35;  // wetness where that part's power starts cutting out and coming back
+const DROWN_TIME      = 10;    // seconds under water before the air generator drowns (A-13)
+const AIR_WEAR_TIME   = 300;   // seconds of making air before the filter is worn out (A-11), +-30% per filter
+const PUMP_WEAR_TIME  = 240;   // seconds of pumping before the pipe wears out (P-21), +-30% per pipe
+const HORN_LINE_CHANCE= 0.15;  // per blast: the horn's pressure line fails (H-61)
+const CRYSTAL_RANGE   = 160;   // px: a directional ping off Atlantis ruins this close comes back hot enough...
+const CRYSTAL_BURN_CHANCE = 0.15; // ...to burn the transducer this often (S-31)
+const WINDOW_LEAK     = 0.004; // cabin water per second through a cracked window (W-51)
 // Loot + robot arm
 const RELIC_SIZE     = 16;
 const RELIC_VALUE    = 125;    // the two bait relics by the creature
@@ -331,6 +341,7 @@ const CRANK_POS = [24, 6], CRANK_R = 6;           // air hand crank on the back 
 const STORAGE_POLY = [[46, -36], [102, -36], [105, -25], [58, -25]];
 const PANEL_POLY = [[96, -25], [104, -25], [110, 0], [107, 41], [82, 41], [82, 16], [95, 12]];
 const PUMP_BOX = [5, 42, 23, 8];                  // blue, in the floor next to the floor slot
+const WINDOW_POS = [61, -16], WINDOW_R = 5;       // small porthole in the cabin wall
 const PROP_POS = [-85, 40];                       // propeller disc under the engine room
 const CHAIR_X = 62;                               // where you sit
 const SIT_RANGE = [24, 52];                       // stand here to sit down
@@ -369,7 +380,7 @@ let viewScale = 1;
 let logLines = [];
 
 function reset() {
-  sub = { x: DOCK_X, y: DOCK_Y, vx: 0, vy: 0, ang: 0, angV: 0, hp: MAX_HP, hullImm: 0, dead: false };
+  sub = { x: DOCK_X, y: DOCK_Y, vx: 0, vy: 0, ang: 0, angV: 0, hp: MAX_HP, hullImm: 0, dead: false, patches: 0 };   // patches = hull repairs so far
   cam = { x: DOCK_X, y: DOCK_Y };
   time = 0; runTime = 0;
   coins = 0; paid = 0; quota = QUOTA_START; divesDone = 0; quotasMet = 0;
@@ -379,16 +390,18 @@ function reset() {
   engWater = 0; slosh = { a: 0, v: 0, lastVx: 0 }; termShorted = false;
   // Loose items: spare parts (PIPE, FILTER, METAL), gas canisters (GAS) and horn charges (CHARGE). where: 'storage' | 'hand' | 'floor'
   // (the dock tops the charges up)
-  items = [...START_PARTS.map(type => ({ type, where: 'storage' })), ...Array.from({ length: START_GAS }, () => ({ type: 'GAS', where: 'storage' }))];
+  items = Object.entries(START_LOADOUT).flatMap(([type, n]) => Array.from({ length: n }, () => ({ type, where: 'storage' })));
   // Engine: 'running' | 'off'. report = why it's off. stopIn > 0 = report shown, engine still turning.
   engine = { state: 'running', report: null, stopIn: 0, flooded: false };
   gen = { on: true, boot: 0 };
   sys = { sonar: true, pump: false, lights: true };
   parts = {
     propeller: { broken: false, bumps: 0, imm: 0 },
-    panel:     { broken: false, imm: 0 },
-    storage:   { broken: false, imm: 0 },
+    panel:     { broken: false, imm: 0, scars: [] },
+    storage:   { broken: false, imm: 0, scars: [] },
     pumpMech:  { broken: false, dead: false, imm: 0 }, // dead = exploded, gone for the run
+    engine:    { imm: 0, ...newPartState() },           // coded failures (E-xx) and its wire
+    window:    { imm: 0, ...newPartState() },           // the porthole (W-51), no wire
   };
   // Modules: slot index, or -1 = in storage (carried = in the figure's hand)
   modules = [
@@ -397,6 +410,7 @@ function reset() {
     { id: 'PUMP',  slot: FLOOR_SLOT, broken: false, imm: 0, carried: false },
     { id: 'HORN',  slot: -1, broken: false, imm: 0, carried: false, loaded: 0 },   // loaded = air in its charge (0 = empty)
   ];
+  for (const m of modules) Object.assign(m, newPartState());   // each module is a coded part: failure, break count, scars, wire
   creature = { x: CREATURE_HOME[0], y: CREATURE_HOME[1], vx: 0, vy: 0 };
   hornWaves = [];
   arm = { u: railLength() * 0.55, tipX: DOCK_X, tipY: DOCK_Y, ox: 0, oy: 40, held: null, tie: 0, hits: 0, broken: false };
@@ -430,22 +444,30 @@ function inPoly(p, pts) {
   }
   return c;
 }
-const power = () => engine.state === 'running' && gen.on && gen.boot <= 0;
+const power = () => engine.state === 'running' && gen.on && gen.boot <= 0 && wireLive('engine');
+// The emergency battery: keeps the lights, panel lamps and repair panels alive for RED_LIGHT_TIME after power drops
+const batteryAlive = () => power() || gen.boot > 0 || darkT < RED_LIGHT_TIME;
 const panelOk = () => !parts.panel.broken;
 const terminalAlive = () => !termShorted && (power() || darkT < TERMINAL_BACKUP);
 // Items
 const ITEM_TYPES = {
   PIPE:     { name: 'COMPRESSION PIPE', short: 'PIPE' },     // fixes the pump (mechanism and module)
   FILTER:   { name: 'AIR FILTER',       short: 'FILTER' },   // fixes the air generator
-  METAL:    { name: 'METAL PART',       short: 'METAL' },    // fixes everything else, including a malfunctioned engine
+  METAL:    { name: 'METAL PART',       short: 'METAL' },    // fixes impact breaks (cracks), on anything
+  COPPER:   { name: 'COPPER WIRE',      short: 'COPPER' },   // fixes a soaked wire (C-71)
+  TRANSDUCER: { name: 'SONAR TRANSDUCER', short: 'TRANSDUCER' }, // the sonar's own spare (S-31)
   GAS:      { name: 'GAS CANISTER',     short: 'GAS' },      // gasoline: +33% fuel poured into the engine
   CHARGE:   { name: 'SHOCKWAVE CHARGE', short: 'CHARGE' },   // compressed air: horn ammo, or emergency air
 };
 const isItem = c => c && !!c.type;
 const carriedName = c => isItem(c) ? ITEM_TYPES[c.type].short : c.id;
-const sparesAboard = () => items.filter(i => i.type !== 'CHARGE').length;            // weight (parts and gasoline)
-const storedParts = () => items.filter(i => i.where === 'storage' && i.type !== 'CHARGE').length;
-const storedOf = type => items.filter(i => i.where === 'storage' && i.type === type).length;
+const cnt = i => i.n || 1;                                                             // a hand or floor stack holds n of one kind
+const sparesAboard = () => items.filter(i => i.type !== 'CHARGE').reduce((a, i) => a + cnt(i), 0);   // weight (parts and gasoline)
+const storedOf = type => items.filter(i => i.where === 'storage' && i.type === type).reduce((a, i) => a + cnt(i), 0);
+const storedTypes = () => new Set(items.filter(i => i.where === 'storage').map(i => i.type)).size;
+const canStoreType = type => storedOf(type) > 0 || storedTypes() < MAX_ITEM_TYPES;     // quantities are unlimited, kinds are not
+// Use up k of the item in your hand
+function consume(k = 1) { carry.n = cnt(carry) - k; if (carry.n <= 0) { items.splice(items.indexOf(carry), 1); carry = null; } }
 const charges = () => storedOf('CHARGE');                                              // spare horn charges
 const storedCharges = () => items.filter(i => i.where === 'storage' && i.type === 'CHARGE');
 const storageLeaking = () => parts.storage.broken && phase === 'dive' && storedCharges().length > 0;
@@ -453,10 +475,10 @@ const mass = () => 1 + sparesAboard() * PART_MASS;
 const moduleIn = slot => modules.find(m => m.slot === slot && !m.carried);
 const mod = id => modules.find(m => m.id === id);
 const installed = id => { const m = mod(id); return m.slot >= 0 && !m.carried && !m.broken; };
-const sonarWorks = () => power() && panelOk() && sys.sonar && installed('SONAR');   // directional (module)
+const sonarWorks = () => power() && panelOk() && sys.sonar && installed('SONAR') && partPowered('sonar');   // directional (module)
 const omniWorks = () => power() && panelOk() && sys.sonar;                          // all-around (built in)
-const pumpRunning = () => { const p = moduleIn(FLOOR_SLOT); return sys.pump && power() && p && p.id === 'PUMP' && !p.broken && !parts.pumpMech.broken && !parts.pumpMech.dead; };
-const airMaking = () => power() && installed('AIR');
+const pumpRunning = () => { const p = moduleIn(FLOOR_SLOT); return sys.pump && power() && p && p.id === 'PUMP' && !p.broken && !parts.pumpMech.broken && !parts.pumpMech.dead && partPowered('pump'); };
+const airMaking = () => power() && installed('AIR') && partPowered('air') && !submerged('air');   // a drowned unit waits for the pump
 const armWorks = () => !arm.broken && power() && panelOk();
 const crankTurning = () => time - crank.lastT < CRANK_WINDOW;
 const doorOpenTo = () => 3 - 28 * hatch.progress;  // door slides up: the gap is open below this y
@@ -628,6 +650,7 @@ const SFX = {
   sold:    () => { tone(1320, 0.15, 0, 'triangle', 0.04); tone(1760, 0.3, 0.08, 'triangle', 0.04); },
   inflate: () => noise(1.2, 0.08, { type: 'bandpass', freq: 600, glide: 1400, attack: 0.3 }),
   alarm:   () => { tone(880, 0.22, 0, 'square', 0.025, { cut: 2000 }); tone(660, 0.22, 0.26, 'square', 0.025, { cut: 2000 }); },
+  code:    () => { tone(1560, 0.06, 0, 'square', 0.03, { cut: 3000 }); tone(1560, 0.06, 0.09, 'square', 0.03, { cut: 3000 }); },
   heart:   v => { tone(58, 0.14, 0, 'sine', 0.25 * v, { glide: 40 }); tone(52, 0.16, 0.2, 'sine', 0.18 * v, { glide: 38 }); },
 };
 const thud = SFX.thud, roar = SFX.roar;
@@ -682,14 +705,15 @@ function log(t, sev = 'warn') {
 function startDock(first) {
   phase = 'dock'; dockT = DOCK_TIME; maxDepth = 0; fix = null; fixSaved = {};
   sub.x = DOCK_X; sub.y = DOCK_Y; sub.vx = sub.vy = 0;
-  if (!first) sub.hp = Math.max(sub.hp, Math.ceil(MAX_HP * HULL_FREE_FRACTION));
+  if (!first && sub.hp < Math.ceil(MAX_HP * HULL_FREE_FRACTION)) { sub.hp = Math.ceil(MAX_HP * HULL_FREE_FRACTION); sub.patches++; }
   water = 0; engWater = 0; termShorted = false; air = 1;
-  if (fuel > 0) { engine.state = 'running'; engine.report = null; engine.stopIn = 0; }
+  if (fuel > 0 && !parts.engine.fail && !parts.engine.wire.broken) { engine.state = 'running'; engine.report = null; engine.stopIn = 0; }
   gen.on = true; gen.boot = 0; arm.hits = 0;
   // Horn charges refilled: one loaded in the horn, the rest topped up in storage (HORN_CHARGES in all)
   mod('HORN').loaded = 1;
   for (const c of items) if (c.type === 'CHARGE') { c.gas = 1; c.leak = 0; }
-  for (let n = items.filter(i => i.type === 'CHARGE').length; n < HORN_CHARGES - 1; n++) items.push({ type: 'CHARGE', where: 'storage', gas: 1 });
+  if (canStoreType('CHARGE')) for (let n = items.filter(i => i.type === 'CHARGE').length; n < HORN_CHARGES - 1; n++) items.push({ type: 'CHARGE', where: 'storage', gas: 1 });
+  for (const n of WIRED) { const w = P(n).wire; w.wet = 0; w.off = false; }   // wires dry out on the surface (a soaked one stays dead until rewired)
   hornWaves = [];
   creature.x = CREATURE_HOME[0]; creature.y = CREATURE_HOME[1]; creature.vx = creature.vy = 0;
   // Fresh loot every dive: the bait by the creature, a couple in the trench, most of it in the ruins
@@ -722,12 +746,12 @@ function payQuota() {
 }
 function buyGas() {
   if (phase !== 'dock' || coins < GAS_COST) return;
-  if (storedParts() >= MAX_PARTS) return log('STORAGE FULL', 'warn');
+  if (!canStoreType('GAS')) return log('STORAGE: NO ROOM FOR ANOTHER KIND', 'warn');
   coins -= GAS_COST; items.push({ type: 'GAS', where: 'storage' }); log('BOUGHT A GAS CANISTER', 'good');
 }
 function buyHull() {
   if (phase !== 'dock' || coins < HULL_HIT_COST || sub.hp >= MAX_HP) return;
-  coins -= HULL_HIT_COST; sub.hp = Math.min(MAX_HP, sub.hp + HIT_DAMAGE); log(`HULL +${HIT_DAMAGE}`, 'good');
+  coins -= HULL_HIT_COST; sub.hp = Math.min(MAX_HP, sub.hp + HIT_DAMAGE); sub.patches++; log(`HULL +${HIT_DAMAGE}`, 'good');
 }
 function fail(reason) {
   if (sub.dead) return;
@@ -742,8 +766,8 @@ function engineShutdown(report) {
   engine.report = report; engine.stopIn = REPORT_LEAD;
   if (report === 'malfunction') engWater = Math.max(engWater, BAY_FLOOD);   // the bay floods behind its sealed door
   if (report === 'prevention') { log('! ENGINE MALFUNCTION PREVENTION', 'warn'); tone(180, 0.4, 0, 'square', 0.06); }
-  else if (report === 'malfunction') { log('X ENGINE MALFUNCTION', 'bad'); tone(300, 0.12); tone(300, 0.12, 0.18); }
-  else log('FUEL EXHAUSTED', 'bad');
+  else if (report === 'malfunction') { tone(300, 0.12); tone(300, 0.12, 0.18); }   // the code itself is printed by failPart
+  else if (report === 'fuel') log('FUEL EXHAUSTED', 'bad');
 }
 function updatePower(dt) {
   if (engine.stopIn > 0 && (engine.stopIn -= dt) <= 0) { engine.stopIn = 0; engine.state = 'off'; }
@@ -808,10 +832,7 @@ function updateWater(dt) {
   // Pump: clears cabin water, but running dry sparks and then explodes
   if (pumpRunning()) {
     if (water > 0) { water = Math.max(0, water - PUMP_RATE * dt); pumpSpark = 0; }
-    else if ((pumpSpark += dt) >= DRY_SPARK_TIME) {
-      parts.pumpMech.dead = true; pumpSpark = 0; air = Math.max(0, air - PUMP_BLAST_AIR);
-      kick(SHAKE_WALL * 2, 0); SFX.boom(); log('PUMP EXPLODED (RAN DRY)', 'bad');
-    }
+    else if ((pumpSpark += dt) >= DRY_SPARK_TIME) { pumpSpark = 0; SFX.zap(); failPart('pump', 'P-22'); }   // ran dry too long: burnt out
   } else pumpSpark = 0;
   // Water in the electrics: above WATER_SHORT the terminal shorts out until the cabin is (nearly) dry again
   if (!termShorted && water > WATER_SHORT) { termShorted = true; log('WATER IN THE ELECTRICS - TERMINAL SHORTED', 'bad'); SFX.zap(); }
@@ -852,26 +873,30 @@ function armHit() {
 const partRef = id => id.startsWith('slot') ? moduleIn(+id[4]) : parts[id];
 const PART_NAMES = { panel: 'CONTROL PANEL', storage: 'STORAGE', pumpMech: 'PUMP MECHANISM' };
 // One part on the side that hit rolls (not all of them), chance scaling with impact speed.
-// First bad roll = DAMAGED (still works, warning), second = BROKEN.
+// First bad roll = DAMAGED (silent for coded parts: no mark, no message), second = BROKEN (coded parts: their impact code).
+// 'slotN' = whatever module sits in slot N; 'pump' = the pump housing in the floor; 'engine', 'window' = those parts.
+const SIDE_PARTS = { bottom: ['pump', 'slot3'], top: ['storage', 'slot0'], front: ['panel', 'slot1', 'window'], back: ['slot2', 'engine'] };
 function rollParts(side, speed) {
-  const cand = ({
-    bottom: ['pumpMech', 'slot3'],
-    top:    ['storage', 'slot0'],
-    front:  ['panel', 'slot1'],
-    back:   ['slot2'],
-  }[side] || []).filter(id => { const p = partRef(id); return p && !p.broken && !p.dead && p.imm <= 0; });
+  const seen = new Set(), cand = [];
+  for (const id of SIDE_PARTS[side] || []) {
+    const m = id.startsWith('slot') ? moduleIn(+id[4]) : null, name = m ? MODULE_PART[m.id] : PART_LIST.includes(id) ? id : null;
+    const p = name ? P(name) : parts[id];
+    if (!p || p.broken || p.dead || p.imm > 0 || seen.has(p)) continue;
+    seen.add(p); cand.push({ id, name, p });
+  }
   if (!cand.length) return;
-  const id = cand[Math.floor(Math.random() * cand.length)], p = partRef(id);
+  const { id, name, p } = cand[Math.floor(Math.random() * cand.length)];
   p.imm = PART_IMMUNITY;
   const f = clamp((speed - HIT_SPEED) / (HARD_HIT_SPEED - HIT_SPEED), 0, 1);
   const chance = (PART_CHANCE_SOFT + (PART_CHANCE_HARD - PART_CHANCE_SOFT) * f) * (id === 'storage' ? STORAGE_CHANCE_MULT : 1);
   if (Math.random() >= chance) return;
-  const name = id.startsWith('slot') ? p.id + ' MODULE' : PART_NAMES[id];
-  if (!p.worn) { p.worn = true; log(`${name} DAMAGED - NEXT HIT BREAKS IT`, 'warn'); }
-  else if (id.startsWith('slot')) { p.broken = true; log(`${name} BROKEN`, 'bad'); }
+  if (name) { if (!p.worn) p.worn = true; else failPart(name, IMPACT_CODE[name]); return; }
+  if (!p.worn) { p.worn = true; log(`${PART_NAMES[id]} DAMAGED - NEXT HIT BREAKS IT`, 'warn'); }
   else breakPart(id);
 }
-function breakPart(id) {
+function breakPart(id, code) {
+  // Test hook / coded parts: breakPart('air', 'A-11') forces any failure (no code = that part's impact break)
+  if (PART_LIST.includes(id) || code) return failPart(id, code || IMPACT_CODE[id]);
   parts[id].broken = true;
   if (id === 'panel') {
     // Everything freezes as it is: switches, screens, and the throttle you were holding
@@ -901,7 +926,7 @@ function rockHit(side, dirX, speed) {
 // Creature contact: big shake from the engine side. Always breaks the engine; works through propeller -> engine -> panel.
 function creatureHit(dirX) {
   kick(SHAKE_CREATURE, -1); roar(); stumble(dirX); shoveItems(dirX, 80);
-  engineShutdown('malfunction');
+  engineShutdown('malfunction'); failPart('engine', 'E-41');
   const pr = parts.propeller;
   if (pr.imm <= 0) {
     pr.imm = PART_IMMUNITY;
@@ -916,9 +941,121 @@ function creatureHit(dirX) {
   damageHull(CREATURE_DAMAGE);
 }
 
+// ===================== FAILURES, CODES, WIRING =====================
+// Six coded parts. Each keeps its own failure (one code at a time), break count, scars, wear, and (if it uses power)
+// its own wire. Two kinds of break: IMPACT (a crack: metal fixes it) and INTERNAL (wear, burn, water: only that part's
+// own spare fixes it). A soaked wire is its own failure, C-71, fixed with copper. The terminal only ever prints codes;
+// the handbook (J) says what they mean.
+const PART_LIST = ['air', 'pump', 'sonar', 'horn', 'engine', 'window'];
+const PART_LABEL = { air: 'AIR GENERATOR', pump: 'PUMP', sonar: 'SONAR', horn: 'HORN', engine: 'ENGINE', window: 'WINDOW' };
+const WIRED = ['air', 'pump', 'sonar', 'horn', 'engine'];                    // the window has no wire
+const MODULE_PART = { AIR: 'air', PUMP: 'pump', SONAR: 'sonar', HORN: 'horn' };
+const IMPACT_CODE = { air: 'A-12', pump: 'P-23', sonar: 'S-32', horn: 'H-62', engine: 'E-42', window: 'W-51' };
+const HOME_GAME = { air: 'filter', pump: 'screw', sonar: 'filter', horn: 'screw', engine: 'rivet', window: 'rivet' };   // copper wire repairs use these
+// code: part, kind, the item that fixes it, what you notice, why it happened
+const FAILS = {
+  'A-11': { part: 'air',    kind: 'internal', fix: 'FILTER',     symptom: 'Air stops being made.',                 cause: 'Filter worn out from use.' },
+  'A-12': { part: 'air',    kind: 'impact',   fix: 'METAL',      symptom: 'Air stops being made.',                 cause: 'Frame cracked by an impact.' },
+  'A-13': { part: 'air',    kind: 'internal', fix: 'METAL',      symptom: 'Air stops after 10 s under water.',     cause: 'Unit reached by water. After the metal, it only runs again once the water is pumped below it.' },
+  'P-21': { part: 'pump',   kind: 'internal', fix: 'PIPE',       symptom: 'Pump stops.',                           cause: 'Compression pipe worn out.' },
+  'P-22': { part: 'pump',   kind: 'internal', fix: 'PIPE',       symptom: 'Pump stops after sparking.',            cause: 'Ran dry too long.' },
+  'P-23': { part: 'pump',   kind: 'impact',   fix: 'METAL',      symptom: 'Pump stops.',                           cause: 'Housing cracked by an impact.' },
+  'S-31': { part: 'sonar',  kind: 'internal', fix: 'TRANSDUCER', symptom: 'Directional ping goes silent.',         cause: 'Transducer burnt by a crystal echo (pinging ruins up close).' },
+  'S-32': { part: 'sonar',  kind: 'impact',   fix: 'METAL',      symptom: 'Directional ping goes silent.',         cause: 'Cracked by an impact.' },
+  'H-61': { part: 'horn',   kind: 'internal', fix: 'PIPE',       symptom: 'Horn will not fire.',                   cause: 'Pressure line failed (same pipe as the pump).' },
+  'H-62': { part: 'horn',   kind: 'impact',   fix: 'METAL',      symptom: 'Horn will not fire.',                   cause: 'Cracked by an impact.' },
+  'E-41': { part: 'engine', kind: 'impact',   fix: 'METAL',      symptom: 'Engine stops. Engine room floods.',     cause: 'Seized by an impact.' },
+  'E-42': { part: 'engine', kind: 'impact',   fix: 'METAL',      symptom: 'Engine stops.',                         cause: 'Mount cracked.' },
+  'W-51': { part: 'window', kind: 'impact',   fix: 'METAL',      symptom: 'Water leaks in.',                       cause: 'Cracked by an impact.' },
+  'C-71': { part: 'wiring', kind: 'wire',     fix: 'COPPER',     symptom: 'Part dead, its power lamp dark. Before that it flickers.', cause: 'Wire soaked. No power reaches the part.' },
+};
+function newPartState() {
+  return { fail: null, broken: false, worn: false, breakCount: 0, scars: [], wear: 0, wearMul: 0.7 + Math.random() * 0.6, under: 0,
+           wire: { wet: 0, broken: false, breakCount: 0, off: false, t: 0 } };
+}
+const P = name => name === 'engine' || name === 'window' ? parts[name] : mod(name.toUpperCase());
+const wireLive = name => { const w = P(name).wire; return !w.broken && !w.off; };
+// Does power reach this part? (the horn only fires a solenoid, so the emergency battery is enough for it)
+const partPowered = name => (name === 'horn' ? batteryAlive() : power()) && wireLive(name);
+const costFor = breaks => breaks > 2 ? 2 : 1;   // after a part has broken twice, its repairs take 2 pieces
+// Where a part (or its wire) sits in the sub, for water: null when it isn't mounted anywhere
+function mountOf(name, wire) {
+  if (name === 'engine') return { x: -82, y: wire ? -6 : -10, room: 'engine' };
+  if (name === 'window') return { x: WINDOW_POS[0], y: WINDOW_POS[1], room: 'crew' };
+  const m = P(name);
+  if (m.slot < 0 || m.carried) return null;
+  const c = SLOTS[m.slot].c; return { x: c[0], y: c[1] + (wire ? 3 : 0), room: 'crew' };   // the wire runs just under the unit
+}
+const waterAt = mt => mt && (mt.room === 'engine' ? engWater > 0.005 && engSurfY() < mt.y : water > 0.005 && crewSurfAt(mt.x) < mt.y);
+const submerged = name => waterAt(mountOf(name, false));
+// A failure happens: the part stops, the terminal prints only the code (with a blip and a jolt)
+function failPart(name, code) {
+  const p = P(name);
+  if (code === 'C-71') { if (p.wire.broken) return; p.wire.broken = true; p.wire.wet = 1; p.wire.off = false; p.wire.breakCount++; }
+  else { if (p.fail) return; p.fail = code; p.broken = true; p.worn = false; p.breakCount++; }
+  log(code, 'bad'); SFX.code(); kick(3, 0);
+  if (name === 'engine') engineShutdown(code === 'E-41' ? 'malfunction' : 'fault');
+}
+// Codes showing right now (for the terminal)
+const activeCodes = () => PART_LIST.flatMap(n => { const p = P(n); return [p.fail, p.wire.broken ? 'C-71' : null].filter(Boolean); });
+// What repair the item in your hand would do on this part: { kind: 'part' | 'wire', item, cost, game } or null
+function repairJob(name) {
+  if (!PART_LIST.includes(name)) return oldJob(name);
+  const p = P(name), it = isItem(carry) ? carry : null;
+  if (!it) return null;
+  if (p.wire.broken && it.type === 'COPPER') return { kind: 'wire', item: 'COPPER', cost: costFor(p.wire.breakCount), game: HOME_GAME[name] };
+  if (p.fail && it.type === FAILS[p.fail].fix) return { kind: 'part', item: it.type, cost: costFor(p.breakCount), game: GAME_FOR[it.type] };
+  return null;
+}
+// The storage locker and the control panel aren't coded parts: a damaged or broken one takes one METAL (rivets).
+// A live control panel can't be opened up: cut the breaker first. The breaker and the hull have nothing to repair here.
+function oldJob(name) {
+  const p = parts[name], it = isItem(carry) ? carry : null;
+  if ((name !== 'storage' && name !== 'panel') || !(p.broken || p.worn) || !it || it.type !== 'METAL') return null;
+  if (name === 'panel' && (power() || gen.boot > 0)) return null;
+  return { kind: 'old', item: 'METAL', cost: 1, game: 'rivet' };
+}
+// Every repair leaves a scar on the part: weld bead (metal), mismatched plate (a spare), taped wire (copper)
+function addScar(p, type) { p.scars.push({ type, u: Math.random(), v: Math.random(), a: (Math.random() - 0.5) * 1.2 }); }
+function repairPart(name, job) {
+  const p = P(name);
+  if (job) consume(job.cost);
+  const fixWire = !job || job.kind === 'wire', fixPart = !job || job.kind === 'part';
+  if (fixWire && p.wire.broken) { p.wire.broken = false; p.wire.wet = 0; p.wire.off = false; addScar(p, 'tape'); log('C-71 CLEARED', 'good'); }
+  if (fixPart && p.fail) {
+    const code = p.fail; p.fail = null; p.broken = false; p.worn = false; p.wear = 0; p.under = 0; p.wearMul = 0.7 + Math.random() * 0.6;
+    addScar(p, FAILS[code].fix === 'METAL' ? 'weld' : 'plate'); log(`${code} CLEARED`, 'good');
+    if (name === 'engine' && engine.state === 'off' && engine.report !== 'fuel') engine.report = null;   // fixed: restart it by hand
+  }
+  SFX.fixed();
+}
+// Wires get wet, flicker, then die; units wear out and drown; a cracked window leaks
+function updateParts(dt) {
+  if (phase !== 'dive') return;
+  for (const name of WIRED) {
+    const w = P(name).wire;
+    if (name === 'pump') { w.wet = 0; w.off = false; continue; }   // the pump's wire is sealed: water never breaks it
+    const wet = waterAt(mountOf(name, true));
+    w.wet = clamp(w.wet + (wet ? dt / WIRE_WET_TIME : -dt / WIRE_DRY_TIME), 0, 1);
+    if (!w.broken && w.wet >= 1) failPart(name, 'C-71');
+    if (!w.broken && w.wet >= WIRE_FLICKER_AT) {   // stage 1: power to the part cuts out and comes back
+      if ((w.t -= dt) <= 0) { w.off = !w.off; w.t = w.off ? 0.05 + Math.random() * 0.3 : 0.15 + Math.random() * 2 * (1.2 - w.wet); }
+    } else w.off = false;
+  }
+  const a = P('air');
+  if (airMaking() && (a.wear += dt / (AIR_WEAR_TIME * a.wearMul)) >= 1) failPart('air', 'A-11');
+  if (!a.fail && submerged('air')) { if ((a.under += dt) >= DROWN_TIME) failPart('air', 'A-13'); } else a.under = 0;
+  const pu = P('pump');
+  if (pumpRunning() && water > 0 && (pu.wear += dt / (PUMP_WEAR_TIME * pu.wearMul)) >= 1) failPart('pump', 'P-21');
+  if (parts.window.fail) water += WINDOW_LEAK * dt;
+  if (engine.state === 'running' && engine.stopIn <= 0 && (parts.engine.fail || parts.engine.wire.broken)) engineShutdown('fault');
+}
+// Test hook: soak a wire (amount 1 = soaked, C-71; less = just wet)
+function wetWire(name, amount = 1) { const w = P(name).wire; w.wet = amount; if (amount >= 1) failPart(name, 'C-71'); }
+
 // ===================== INPUT =====================
 addEventListener('keydown', e => {
-  if (e.code === 'Tab') e.preventDefault();
+  if (e.code === 'Tab' || e.code === 'F3') e.preventDefault();
   if (title) { if (!e.repeat && ['Space', 'Enter'].includes(e.code)) startGame(); return; }
   initAudio();
   if (!e.repeat) {
@@ -926,11 +1063,14 @@ addEventListener('keydown', e => {
     if (e.code === 'Backquote') showDebug = !showDebug;
     if (e.code === 'Enter') dismissTip();
     if (e.code === 'KeyF') toggleSeat();
+    if (e.code === 'F3') showF3 = !showF3;
+    if (e.code === 'KeyJ') book.open = !book.open;
     if (e.code === 'KeyE') {
       const t = !fix && handTarget();
-      if (fix) fixPress(); else if (t && t.can && t.game) startFix(t); else tapE();
+      if (fix && fix.panel && !fix.game) { if (panelHold(fix.panel)) { fix.ePress = time; fix.acted = false; } else stopFix(null); }   // tap E: close
+      else if (fix) fixPress(); else if (t && t.panel) openPanel(t); else if (t && t.can && t.game && batteryAlive()) startFix(t); else tapE();
     }
-    if (e.code === 'Escape') { inv.open = false; grip = null; stopFix(null); }
+    if (e.code === 'Escape') { inv.open = false; grip = null; stopFix(null); book.open = false; }
     if (e.code === 'Space' && mode === 'seated') launch();
     if (e.code === 'KeyH') buyHull();
     if (e.code === 'KeyB') buyGas();
@@ -943,7 +1083,14 @@ addEventListener('keydown', e => {
   keys[e.code] = true;
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
 });
-addEventListener('keyup', e => { keys[e.code] = false; if (e.code === 'KeyE') hold.lock = false; });
+addEventListener('keyup', e => {
+  keys[e.code] = false;
+  if (e.code !== 'KeyE') return;
+  hold.lock = false;
+  // A short tap of E closes a close-up; holding it does the close-up's hold action instead
+  if (fix && fix.panel && !fix.game && fix.ePress !== null && !fix.acted && time - fix.ePress < 0.25) stopFix(null);
+  if (fix) fix.ePress = null;
+});
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = mouse.rdown = false; grip = null; });
 cv.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
 cv.addEventListener('mousedown', e => {
@@ -951,7 +1098,11 @@ cv.addEventListener('mousedown', e => {
   initAudio();
   if (e.button === 2) { mouse.rdown = true; return; }
   if (e.button !== 0) return;
-  if (fix) return fixPress();
+  if (fix) {   // inside the window: hammer a rivet; outside: close it
+    const L = fixLayout(), top = fix.panel ? L.top - 22 : L.y;
+    if (mouse.x < L.x || mouse.x > L.x + L.w || mouse.y < top || mouse.y > L.y + L.h) return stopFix(null);
+    return fixPress();
+  }
   if (mode === 'seated') {
     const b = termButtons.find(b => mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h);
     if (b) { if (b.id === 'horn') fireHorn(); else toggleSystem(b.id); return; }
@@ -959,9 +1110,10 @@ cv.addEventListener('mousedown', e => {
   // Storage inventory: click a module to take it in your hand, or vent a horn charge for air
   if (inv.open) {
     const b = invButtons.find(b => mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h);
-    if (b && b.m) { carry = b.m; carry.carried = true; log(`TOOK ${carry.id}`, 'good'); SFX.clink(); }
-    else if (b && b.type) { const it = items.filter(i => i.where === 'storage' && i.type === b.type).sort((x, y) => (y.gas ?? 1) - (x.gas ?? 1))[0]; it.where = 'hand'; carry = it; log(`TOOK A ${ITEM_TYPES[b.type].short}`, 'good'); SFX.clink(); }
-    inv.open = false; return;
+    if (b && b.m && !carry) { carry = b.m; carry.carried = true; log(`TOOK ${carry.id}`, 'good'); SFX.clink(); inv.open = false; }
+    else if (b && b.type) { takeFromStorage(b.type); return; }   // stays open: click again for a second piece
+    else inv.open = false;
+    return;
   }
   mouse.down = true;
   if (mode === 'standing' && !sub.dead) {
@@ -970,11 +1122,32 @@ cv.addEventListener('mousedown', e => {
     else if (t && t.click && t.can) clickAction(t);
   }
 });
+// Mouse wheel scrolls the handbook while it's open
+addEventListener('wheel', e => { if (book.open && !title) { book.scroll = clamp(book.scroll + e.deltaY * 0.6, 0, book.max); e.preventDefault(); } }, { passive: false });
 addEventListener('mouseup', e => { if (e.button === 0) { mouse.down = false; grip = null; } if (e.button === 2) mouse.rdown = false; });
 cv.addEventListener('contextmenu', e => e.preventDefault());
 function resize() { cv.width = innerWidth; cv.height = innerHeight; }
 addEventListener('resize', resize);
 
+// Take one of a kind into your hand. Same kind again = a stack of 2 (2-piece repairs); another kind swaps with the hand.
+function takeFromStorage(type) {
+  const it = items.filter(i => i.where === 'storage' && i.type === type).sort((x, y) => (y.gas ?? 1) - (x.gas ?? 1))[0];
+  if (!it) return;
+  if (carry && !isItem(carry)) return;                                   // a module in your hand: put it down first
+  if (carry && carry.type === type) {
+    if (type === 'CHARGE' || cnt(carry) >= 2) return;                   // charges don't stack; two pieces at most
+    items.splice(items.indexOf(it), 1); carry.n = cnt(carry) + 1; SFX.clink(); return;
+  }
+  if (carry && !canStoreType(carry.type)) return;
+  if (carry) stowCarry();
+  it.where = 'hand'; carry = it; log(`TOOK A ${ITEM_TYPES[type].short}`, 'good'); SFX.clink();
+}
+// Put what's in your hand into storage (a stack goes back as separate pieces)
+function stowCarry() {
+  if (isItem(carry)) { for (let k = 1; k < cnt(carry); k++) items.push({ type: carry.type, where: 'storage' }); carry.n = 1; carry.where = 'storage'; log(`${ITEM_TYPES[carry.type].short} STORED`, 'good'); }
+  else { carry.slot = -1; carry.carried = false; log(`${carry.id} STORED`, 'good'); }
+  carry = null;
+}
 function toggleSystem(id) {
   if (!power() || !panelOk()) return; // frozen or dead panel: switches don't move
   sys[id] = !sys[id];
@@ -1032,80 +1205,54 @@ const inStorageArea = h => inPoly(h, STORAGE_POLY) || inRect(h, [46, -36, 59, 14
 function handTarget() {
   if (mode !== 'standing' || fig.stun > 0 || inv.open) return null;
   const h = hand, docked = phase === 'dock', item = isItem(carry) ? carry : null;
-  // Repairs: in the dive you need the matching part in your hand; it gets used up
-  const repair = (id, name, need) => {
-    if (docked) return { id, name, hint: `HOLD E: REPAIR ${name} (FREE AT THE DOCK)`, hold: DOCK_REPAIR_TIME, can: true };
-    if (item && item.type === need) return { id, name, need, game: GAME_FOR[need], hint: `E: REPAIR ${name} (USES THE ${ITEM_TYPES[need].short})`, can: true };
-    return { id, hint: `${name} NEEDS A ${ITEM_TYPES[need].short} - TAKE ONE FROM STORAGE`, can: false };
-  };
   if (carry && !item) {   // holding a module
     const si = slotAt(h);
     if (si >= 0) return { id: 'install', slot: si, click: true, can: true,
       hint: `CLICK: INSTALL ${carry.id} IN ${SLOTS[si].name} SLOT${moduleIn(si) ? ' (SWAPS ' + moduleIn(si).id + ' INTO YOUR HAND)' : ''}` };
   }
   if (carry && inStorageArea(h)) {
-    if (parts.storage.broken) return item && item.type === 'METAL' && !docked ? repair('storage', 'STORAGE', 'METAL') : { id: 'store', hint: 'STORAGE BROKEN - PATCH IT WITH A METAL PART', can: false };
-    if (item && item.type !== 'CHARGE' && storedParts() >= MAX_PARTS) return { id: 'store', hint: 'STORAGE FULL', can: false };
-    const r = parts.storage.worn ? repair('storage', 'STORAGE', 'METAL') : null;
-    return { id: 'store', click: true, can: true, hold: r && r.can ? r.hold : 0, need: r && r.need, game: r && r.can ? r.game : null, name: 'STORAGE', hint: (r && r.can ? r.hint + '   ' : '') + `CLICK: PUT THE ${carriedName(carry)} IN STORAGE` };
+    if (parts.storage.broken) return { id: 'store', panel: 'storage', can: true, hint: 'E: INSPECT STORAGE' };
+    if (item && !canStoreType(item.type)) return { id: 'store', panel: 'storage', can: true, hint: `E: INSPECT STORAGE   (NO ROOM FOR ANOTHER KIND: ${MAX_ITEM_TYPES} KINDS MAX)` };
+    return { id: 'store', panel: 'storage', click: true, can: true, hint: `E: INSPECT STORAGE   CLICK: PUT THE ${carriedName(carry)} IN STORAGE` };
   }
   if (dist(h, WHEEL_POS) < WHEEL_R + 3 && !carry) return { id: 'wheel', hint: 'HOLD LMB + CIRCLE: SPIN THE BAY WHEEL (clockwise opens)', grip: true, can: true };
   if (dist(h, CRANK_POS) < CRANK_R + 4 && !carry) return { id: 'crank', hint: 'HOLD LMB + CIRCLE: AIR CRANK', grip: true, can: true };
-  if (inRect(h, ENGINE_BOX)) {
-    if (item && item.type === 'GAS') return fuel > 0.99 ? { id: 'refuel', hint: 'TANK FULL', can: false }
-      : { id: 'refuel', hold: POUR_TIME, can: true, hint: `HOLD E: POUR THE GAS IN (+${Math.round(GAS_FUEL * 100)}% FUEL)` };
-    if (engine.state === 'running') return { id: 'engine', hint: 'ENGINE RUNNING', can: false };
-    if (engine.report === 'fuel') return { id: 'engine', hint: 'NO FUEL', can: false };
-    if (engine.report === 'malfunction') {
-      // A malfunction is real damage: it needs a metal part (free at the dock)
-      const r = repair('engine', 'ENGINE', 'METAL');
-      return r.can ? { ...r, rivets: RIVETS + 1, hint: r.hint.replace('REPAIR ENGINE', 'FIX + RESTART ENGINE') } : r;
-    }
-    return { id: 'engine', hint: 'HOLD E: RESTART ENGINE', hold: RESTART_PREVENTION, can: true };
-  }
-  if (dist(h, BREAKER_POS) < 6) return { id: 'breaker', hint: gen.on ? 'HOLD E: CUT POWER' : 'HOLD E: POWER ON', hold: BREAKER_HOLD, can: true };
+  if (inRect(h, ENGINE_BOX)) return { id: 'engine', panel: 'engine', can: true, hint: 'E: INSPECT ENGINE' };
+  if (dist(h, BREAKER_POS) < 6) return { id: 'breaker', panel: 'breaker', can: true, hint: 'E: INSPECT BREAKER + BATTERY' };
   const si = slotAt(h);
   if (si >= 0) {
     const m = moduleIn(si);
     if (!m) return { id: 'slot', hint: `${SLOTS[si].name} SLOT EMPTY`, can: false };
-    const r = m.broken || m.worn ? repair('slot' + si, m.id, PART_FOR[m.id]) : null;
-    if (item && item.type === 'CHARGE' && m.id === 'HORN' && !m.broken)   // reload the horn
-      return m.loaded > 0 ? { id: 'load', hint: 'HORN ALREADY LOADED', can: false } : { id: 'load', hold: RELOAD_TIME, can: true, hint: 'HOLD E: LOAD THE CHARGE INTO THE HORN' };
-    if (carry) return r || { id: 'slot', hint: 'HANDS FULL', can: false };
-    return { id: 'slot' + si, slot: si, click: true, can: true, hold: r && r.can ? r.hold : 0, need: r && r.need, game: r && r.can ? r.game : null, name: m.id,
-      hint: (r ? r.hint + '   ' : '') + `CLICK: TAKE ${m.id} OUT` };
+    const name = MODULE_PART[m.id];
+    return { id: 'slot' + si, slot: si, panel: name, click: !carry, can: true, hint: `E: INSPECT ${PART_LABEL[name]}${carry ? '' : `   CLICK: TAKE ${m.id} OUT`}` };
   }
   if (!carry && inStorageArea(h)) {
-    // Damaged or broken storage still opens (click: get the leaking charges out!) and can be patched (hold E at the dock)
-    const r = parts.storage.broken || parts.storage.worn ? repair('storage', 'STORAGE', 'METAL') : null;
-    return { id: 'storage', click: true, can: true, hold: r && r.can ? r.hold : 0, hint: (r ? r.hint + '   ' : '') + (storageLeaking() ? 'CLICK: OPEN - GET THE CHARGES OUT!' : 'CLICK: OPEN STORAGE') };
+    // Damaged or broken storage still opens (click), and its close-up (E) is where it gets patched
+    return { id: 'storage', panel: 'storage', click: true, can: true, hint: 'E: INSPECT STORAGE   CLICK: OPEN' };
   }
-  if (inRect(h, PUMP_BOX, 4)) {
-    if (parts.pumpMech.dead) return { id: 'pumpMech', hint: 'PUMP EXPLODED - GONE', can: false };
-    if (parts.pumpMech.broken || parts.pumpMech.worn) return repair('pumpMech', 'PUMP', 'PIPE');
-  }
-  if (inPoly(h, PANEL_POLY) && (parts.panel.broken || parts.panel.worn)) {
-    if (power() || gen.boot > 0) return { id: 'panel', hint: 'PANEL LIVE - CUT POWER (BREAKER IN THE ENGINE BAY)', can: false };
-    return repair('panel', 'PANEL', 'METAL');
-  }
+  if (inRect(h, PUMP_BOX, 4)) return { id: 'pumpBox', panel: 'pump', can: true, hint: 'E: INSPECT PUMP' };
+  if (dist(h, WINDOW_POS) < WINDOW_R + 2) return { id: 'window', panel: 'window', can: true, hint: 'E: INSPECT WINDOW' };
+  if (inPoly(h, PANEL_POLY)) return { id: 'panel', panel: 'panel', can: true, hint: 'E: INSPECT CONTROL PANEL' };
   // Loose items on the floor: pick one up
   if (!carry) {
     const it = items.find(i => i.where === 'floor' && dist(h, [itemPos(i).x, itemPos(i).y]) < 7);
     if (it) return { id: 'pickup', it, click: true, can: true, hint: `CLICK: PICK UP THE ${ITEM_TYPES[it.type].name}` };
   }
+  // The hull: touch the cabin's ceiling plates
+  if (hand.y < -26 && inPoly(h, CREW_ROOM)) return { id: 'hull', panel: 'hull', can: true, hint: 'E: INSPECT HULL WALL' };
   // Holding something with nothing to use it on
   if (item && item.type === 'CHARGE') return { id: 'vent', hold: 1.0, can: air < 1, click: true, hint: `CHARGE: LOAD IT INTO THE HORN, OR HOLD E: OPEN THE VALVE (+${Math.round(CHARGE_AIR * 100 * (item.gas ?? 1))}% AIR)   CLICK: DROP IT` };
-  if (item) return { id: 'drop', click: true, can: true, hint: `CARRYING A ${ITEM_TYPES[item.type].name} (${{ PIPE: 'FIXES THE PUMP', FILTER: 'FIXES THE AIR GENERATOR', METAL: 'FIXES EVERYTHING ELSE', GAS: 'POUR IT INTO THE ENGINE' }[item.type]})   CLICK: DROP IT` };
+  if (item) return { id: 'drop', click: true, can: true, hint: `CARRYING ${cnt(item) > 1 ? cnt(item) + 'x ' : 'A '}${ITEM_TYPES[item.type].name}   CLICK: DROP IT` };
   if (carry) return { id: 'carrying', hint: `CARRYING ${carry.id} - CLICK A RED SLOT OR THE STORAGE`, can: false };
   return null;
 }
 function holdAction(t) {
   const id = t.id;
   // Used-up part leaves the hand
-  if (t.need && phase !== 'dock' && isItem(carry) && carry.type === t.need) { items.splice(items.indexOf(carry), 1); carry = null; }
+  if (t.need && phase !== 'dock' && isItem(carry) && carry.type === t.need) consume(1);
   if (id === 'vent') return ventCharge();
   if (id === 'refuel') {
-    items.splice(items.indexOf(carry), 1); carry = null;
+    consume(1);
     fuel = Math.min(1, fuel + GAS_FUEL); SFX.pour();
     if (engine.state === 'off' && engine.report === 'fuel') engine.report = 'prevention';   // dry engine: just restart it now
     return log(`REFUELED: ${Math.round(fuel * 100)}%`, 'good');
@@ -1131,11 +1278,7 @@ function clickAction(t) {
     carry.slot = t.slot; carry.carried = false; log(`${carry.id} -> ${SLOTS[t.slot].name} SLOT`, 'good');
     carry = null; bucket(); SFX.clunk(); if (phase === 'dive') SFX.gush();
     if (other) { other.slot = -1; other.carried = true; carry = other; }
-  } else if (t.id === 'store') {
-    if (isItem(carry)) { carry.where = 'storage'; log(`${ITEM_TYPES[carry.type].short} STORED`, 'good'); }
-    else { carry.slot = -1; carry.carried = false; log(`${carry.id} STORED`, 'good'); }
-    carry = null; SFX.clunk();
-  }
+  } else if (t.id === 'store') { stowCarry(); SFX.clunk(); }
   else if (t.id === 'storage') { inv.open = true; mouse.down = false; SFX.squeak(); }
   else if (t.id === 'pickup') { t.it.where = 'hand'; carry = t.it; SFX.clink(); }
   else if (t.id === 'drop' || t.id === 'vent') { carry.where = 'floor'; carry.x = clamp(hand.x, WALK_X[0], 100); carry.vx = fig.vx; carry = null; SFX.drop(); }
@@ -1155,23 +1298,40 @@ function updateHold(dt) {
   if ((hold.t += dt) >= t.hold) { holdAction(t); hold.id = null; hold.t = 0; hold.lock = true; }
 }
 // ----- Repair minigames (mid-dive; docked repairs stay a quick hold) -----
-// METAL: hammer the rivets in time. PIPE: screw the compression fitting tight. FILTER: line the cartridge up and push.
-// Getting knocked down, walking off or pressing ESC stops it; progress is kept until you finish (or dock).
-const GAME_FOR = { METAL: 'rivet', PIPE: 'screw', FILTER: 'filter' };
+// METAL: hammer the rivets in time. PIPE: screw the compression fitting tight. FILTER (and the transducer): line it up
+// and push. Getting knocked down, walking off or pressing ESC stops it; progress is kept until you finish (or dock).
+// Two hosts: the INSPECT PANEL of a coded part (E on it, any time: power lamp + its minigame, greyed out unless it's
+// broken and you hold the right item), and the old direct repair for the control panel and the storage locker.
+const GAME_FOR = { METAL: 'rivet', PIPE: 'screw', FILTER: 'filter', TRANSDUCER: 'filter' };
 let fix = null, fixSaved = {};
+const freshGame = (game, total, prog = 0) => ({ game, total, prog, pos: 0, dir: 1, zone: 0.25 + Math.random() * 0.5, flash: 0, miss: 0, lastA: null, tick: 0, guide: 0.5, fx: 0.5, on: false, push: false });
 function startFix(t) {
   const saved = fixSaved[t.id];
-  fix = { id: t.id, name: t.name, game: t.game, total: t.rivets || RIVETS, prog: saved && saved.game === t.game ? saved.prog : 0,
-          pos: 0, dir: 1, zone: 0.25 + Math.random() * 0.5, flash: 0, miss: 0, lastA: null, tick: 0, guide: 0.5, fx: 0.5, on: false, push: false };
+  fix = { id: t.id, name: t.name, ...freshGame(t.game, t.rivets || RIVETS, saved && saved.game === t.game ? saved.prog : 0) };
   hold.lock = true; grip = null;
 }
+// Inspect panel: opens on any coded part, working or broken. Hands are busy while it's open; the game doesn't pause.
+const CLOSEUP_LABEL = { ...PART_LABEL, breaker: 'BREAKER + BATTERY', hull: 'HULL WALL', storage: 'STORAGE', panel: 'CONTROL PANEL' };
+const CLOSEUP_GAME = { ...HOME_GAME, storage: 'rivet', panel: 'rivet' };   // breaker and hull: nothing to repair in their close-up
+function openPanel(t) {
+  fix = { id: t.id, panel: t.panel, name: CLOSEUP_LABEL[t.panel], game: null, job: null, holdT: 0, ha: null, flash: 0, miss: 0, ePress: null, acted: false };
+  hold.lock = true; grip = null; SFX.clink();
+}
+const saveKey = () => fix.panel ? `${fix.panel}:${fix.job ? fix.job.kind : ''}` : fix.id;
 function stopFix(why) {
   if (!fix) return;
-  fixSaved[fix.id] = { game: fix.game, prog: fix.prog };
+  if (fix.game) fixSaved[saveKey()] = { game: fix.game, prog: fix.prog };
   if (why) log(`REPAIR STOPPED (${why}) - PROGRESS KEPT`, 'warn');
   fix = null;
 }
 function finishFix() {
+  if (fix.panel) {   // panel stays open: you see the lamp come back
+    const name = fix.panel, job = repairJob(name);
+    delete fixSaved[saveKey()]; fix.game = null; fix.job = null;
+    if (job && job.kind === 'old') { holdAction({ id: name, need: 'METAL' }); addScar(parts[name], 'weld'); SFX.fixed(); }
+    else if (job) repairPart(name, job);
+    hold.lock = true; return;
+  }
   const id = fix.id;
   delete fixSaved[id]; fix = null;
   const t = handTarget();
@@ -1186,14 +1346,53 @@ function fixPress() {
     if (fix.prog >= fix.total) finishFix();
   } else { fix.miss = 0.3; SFX.miss(); }
 }
+// What you can do inside a panel without its minigame: hold E for it (free dock repair, restart, pour gas, load the horn)
+function panelHold(name) {
+  const it = isItem(carry) ? carry : null;
+  if (name === 'breaker') return { label: gen.on ? 'HOLD E: CUT POWER' : 'HOLD E: POWER ON', time: BREAKER_HOLD, act: () => holdAction({ id: 'breaker' }) };
+  if (name === 'storage' || name === 'panel') {
+    const q = parts[name];
+    return phase === 'dock' && (q.broken || q.worn) ? { label: 'HOLD E: REPAIR (FREE AT THE DOCK)', time: DOCK_REPAIR_TIME, act: () => { holdAction({ id: name }); addScar(q, 'weld'); } } : null;
+  }
+  if (!PART_LIST.includes(name)) return null;
+  const p = P(name);
+  if (phase === 'dock' && (p.fail || p.wire.broken)) return { label: 'HOLD E: REPAIR (FREE AT THE DOCK)', time: DOCK_REPAIR_TIME, act: () => repairPart(name, null) };
+  if (name === 'engine') {
+    if (it && it.type === 'GAS' && fuel < 0.99) return { label: `HOLD E: POUR THE GAS IN (+${Math.round(GAS_FUEL * 100)}% FUEL)`, time: POUR_TIME, act: () => holdAction({ id: 'refuel' }) };
+    if (engine.state === 'off' && !p.fail && !p.wire.broken && fuel > 0) return { label: 'HOLD E: RESTART ENGINE', time: RESTART_PREVENTION, act: () => holdAction({ id: 'engine' }) };
+  }
+  if (name === 'horn' && it && it.type === 'CHARGE' && !p.fail && p.loaded <= 0) return { label: 'HOLD E: LOAD THE CHARGE', time: RELOAD_TIME, act: () => holdAction({ id: 'load' }) };
+  return null;
+}
+// The panel's minigame runs only when the part is broken AND you hold the right item (enough of it) AND the battery lives
+function panelActive(name) {
+  const job = repairJob(name);
+  return job && cnt(carry) >= job.cost && batteryAlive() && phase === 'dive' ? job : null;
+}
 function updateFix(dt) {
   if (!fix) return;
   if (sub.dead || mode !== 'standing') return stopFix(null);
   if (fig.stun > 0) return stopFix('KNOCKED OFF');
   if (keys.KeyA || keys.KeyD || keys.ArrowLeft || keys.ArrowRight) return stopFix(null);
   const t = handTarget();
-  if (!t || t.id !== fix.id || t.game !== fix.game) return stopFix(null);
+  if (!t || (fix.panel ? t.panel !== fix.panel : t.id !== fix.id || t.game !== fix.game)) return stopFix(null);   // a close-up stays open while you're on that part
   fix.flash = Math.max(0, fix.flash - dt); fix.miss = Math.max(0, fix.miss - dt);
+  if (fix.panel) {
+    const job = panelActive(fix.panel);
+    if (!job) {
+      if (fix.game) { fixSaved[saveKey()] = { game: fix.game, prog: fix.prog }; fix.game = null; fix.job = null; }   // locked: keep progress
+      fix.ha = panelHold(fix.panel);
+      if (fix.ha && keys.KeyE && !hold.lock) { if ((fix.holdT += dt) >= fix.ha.time) { fix.ha.act(); fix.holdT = 0; hold.lock = true; fix.acted = true; } } else fix.holdT = 0;
+      return;
+    }
+    fix.ha = null;
+    if (!fix.game || !fix.job || fix.job.kind !== job.kind || fix.game !== job.game) {
+      fix.job = job;
+      const saved = fixSaved[saveKey()];
+      Object.assign(fix, freshGame(job.game, fix.panel === 'engine' ? RIVETS + 1 : RIVETS, saved && saved.game === job.game ? saved.prog : 0));
+      if (job.game === 'filter') hold.lock = true;   // the E press that opened it isn't a push
+    }
+  }
   const L = fixLayout();
   if (fix.game === 'rivet') {
     fix.pos += fix.dir * RIVET_SPEED * (1 + fix.prog * 0.2) * dt;
@@ -1215,15 +1414,17 @@ function updateFix(dt) {
     // The slot's guide drifts about; keep the cartridge (mouse x) under it and hold E to push it in
     fix.guide = 0.5 + 0.32 * Math.sin(time * 1.2 + Math.sin(time * 0.7) * 2);
     fix.fx = clamp((mouse.x - L.tx) / L.tw, 0, 1);
-    fix.push = !!keys.KeyE; fix.on = Math.abs(fix.fx - fix.guide) < FILTER_SLACK;
+    fix.push = !!keys.KeyE && !hold.lock; fix.on = Math.abs(fix.fx - fix.guide) < FILTER_SLACK;
     if (fix.push && fix.on) { fix.prog += dt / FILTER_TIME; if ((fix.tick -= dt) <= 0) { SFX.slide(); fix.tick = 0.12; } }
     else if (fix.push) { fix.prog = Math.max(0, fix.prog - dt * 0.3); fix.miss = 0.15; if ((fix.tick -= dt) <= 0) { SFX.scrape(); fix.tick = 0.15; } }
     if (fix.prog >= 1) finishFix();
   }
 }
+const CLOSEUP_H = 150;   // height of the close-up (picture + status) above the minigame area
 const fixLayout = () => {
-  const W = cv.width, H = cv.height, w = Math.min(380, W - 32), h = 170, x = (W - w) / 2, y = Math.min(H - h - 16, H * 0.6);
-  return { x, y, w, h, tx: x + 30, tw: w - 60, nx: W / 2, ny: y + 92 };
+  const W = cv.width, H = cv.height, w = Math.min(460, W - 32), h = 170, x = (W - w) / 2;
+  const top = clamp(H * 0.5 - 110, 40, H - h - CLOSEUP_H - 16), y = top + CLOSEUP_H;
+  return { x, y, w, h, top, tx: x + 30, tw: w - 60, nx: W / 2, ny: y + 92 };
 };
 // Loose items on the floor slide with the sub's tilt and get thrown about by hits
 function updateItems(dt) {
@@ -1425,7 +1626,7 @@ function fireHorn() {
   const h = mod('HORN');
   if (sub.dead || mode !== 'seated' || !panelOk() || phase !== 'dive') return;
   if (h.slot < 0 || h.carried) return log('NO HORN MODULE INSTALLED', 'warn');
-  if (h.broken) return log('HORN MODULE BROKEN', 'bad');
+  if (h.broken || !partPowered('horn')) return SFX.dry();   // no words: it just doesn't fire (the code was printed when it failed)
   if (h.loaded <= 0) { SFX.dry(); return log(`HORN EMPTY - RELOAD IT (${charges()} CHARGES IN STORAGE)`, 'bad'); }
   // Fires the loaded charge; a half-leaked one gives a weaker blast. Then someone has to reload it by hand.
   const power = Math.max(0.3, h.loaded); h.loaded = 0;
@@ -1438,6 +1639,7 @@ function fireHorn() {
   sub.vx -= Math.cos(a) * HORN_RECOIL; sub.vy -= Math.sin(a) * HORN_RECOIL;
   kick(SHAKE_WALL, 0); SFX.horn();
   log(`HORN FIRED - RELOAD IT (${charges()} CHARGES IN STORAGE)`, 'warn');
+  if (Math.random() < HORN_LINE_CHANCE) failPart('horn', 'H-61');
 }
 function updateHorn(dt) {
   for (const w of hornWaves) {
@@ -1570,6 +1772,8 @@ function firePing() {
   }
   pings.push({ x: o.x, y: o.y, t: time, rays, noise });
   SFX.ping();
+  // Atlantis' crystal ruins throw a hot echo back up close: it can burn the transducer
+  if (rays.some(r => r.hit && r.kind === 'ruin' && r.dist < CRYSTAL_RANGE) && Math.random() < CRYSTAL_BURN_CHANCE) failPart('sonar', 'S-31');
 }
 // All-around ping from the middle of the hull: a full ring, coarse and crude
 function fireOmni() {
@@ -1640,6 +1844,7 @@ function update(dt) {
   if (phase === 'dock' && (dockT -= dt) <= 0) launch();
   updatePower(dt);
   updateWater(dt);
+  updateParts(dt);
   updateFigure(dt);
   updateFix(dt);
   updateHold(dt);
@@ -1994,7 +2199,7 @@ function drawSub() {
   ctx.drawImage(subLayer.c, ...SUBL_BOX);
   if (blink) { poly(HULL_OUTLINE); ctx.fillStyle = 'rgba(255,60,40,0.3)'; ctx.fill(); }
   // --- Loose items lying on the floor
-  for (const it of items) if (it.where === 'floor') { const p = itemPos(it); drawItemIcon(it.type, p.x, p.y); }
+  for (const it of items) if (it.where === 'floor') { const p = itemPos(it); if (cnt(it) > 1) drawItemIcon(it.type, p.x + 1.6, p.y - 1.2); drawItemIcon(it.type, p.x, p.y); }
   // --- Water (cabin + engine room): murky teal, surface level with the world, sloshing, small waves
   drawWater();
   ctx.font = '3.6px monospace'; ctx.textAlign = 'center'; ctx.lineWidth = 0.6;
@@ -2014,7 +2219,7 @@ function drawSub() {
   if (dh > 0.5) { paintedBox(boxPts([DOOR[0], DOOR[1], DOOR[2], dh]), '#7a6a24', 0.45); hazardBand(DOOR[0], DOOR[1] + dh - 2, DOOR[2], 2); }
   drawWheel(false);
   // --- Storage: spare part count, damage
-  label(`STORAGE  ${storedParts()}/${MAX_PARTS}`, 80, -29.5, '#c8a878');
+  label(`STORAGE  ${storedTypes()}/${MAX_ITEM_TYPES}`, 80, -29.5, '#c8a878');
   if (parts.storage.broken) { brokenWash(STORAGE_POLY); brokenX([58, -36, 44, 11]); } else if (parts.storage.worn) wornMark(103, -28);
   // --- Panel: little screens + blinking buttons (their glow onto the room comes from the light map)
   const live = power() && panelOk();
@@ -2039,16 +2244,61 @@ function drawSub() {
     ctx.rotate(s.h > s.w ? -Math.PI / 2 : 0);
     const ww = s.h > s.w ? s.h - 6 : w;
     paintedBox(boxPts([-ww / 2, -h / 2, ww, h]), MODULE_COLORS[m.id], 0.25);
-    ctx.strokeStyle = m.broken ? '#f33' : m.worn ? '#fd3' : '#6a9a88'; ctx.lineWidth = 0.5; ctx.strokeRect(-ww / 2, -h / 2, ww, h);
-    label(m.id + (m.worn && !m.broken ? '!' : ''), 0, 1.3, m.broken ? '#f66' : m.worn ? '#fd3' : '#b8d8cc');
+    ctx.strokeStyle = '#6a9a88'; ctx.lineWidth = 0.5; ctx.strokeRect(-ww / 2, -h / 2, ww, h);
+    drawScars(m, -ww / 2, -h / 2, ww, h, 1);
+    if (m.fail && FAILS[m.fail].kind === 'impact') drawCrack(-ww / 2, -h / 2, ww, h, m.id.length);   // a crack is physical: you can see it
+    label(m.id, 0, 1.3, '#b8d8cc');
     ctx.restore();
   });
+  // --- Engine housing: scars from past repairs, crack if it's an impact break
+  drawScars(parts.engine, ENGINE_BOX[0] + 2, ENGINE_BOX[1] + 2, ENGINE_BOX[2] - 4, ENGINE_BOX[3] - 4, 1.4);
+  if (parts.engine.fail) drawCrack(ENGINE_BOX[0] + 4, ENGINE_BOX[1] + 4, ENGINE_BOX[2] - 8, ENGINE_BOX[3] - 8, 3);
+  drawWindow();
   drawFigure();
   if (hold.id) {
     const t = handTarget(), f = t && t.hold ? hold.t / t.hold : 0;
     rect([hand.x - 8, hand.y - 9, 16, 2.5], '#222'); rect([hand.x - 8, hand.y - 9, 16 * f, 2.5], '#fa3');
   }
   ctx.restore();
+}
+// Scars: every repair leaves one (weld bead = metal, mismatched plate = a spare, taped wire = copper). They're the
+// only history a part has: count them. Drawn in the part's own box (x, y, w, h), k = size.
+function drawScars(p, x, y, w, h, k) {
+  p.scars.forEach((sc, i) => {
+    const sx = x + 1.5 * k + sc.u * Math.max(1, w - 6 * k), sy = y + 1.5 * k + sc.v * Math.max(1, h - 4 * k);
+    ctx.save(); ctx.translate(sx, sy); ctx.rotate(sc.a);
+    if (sc.type === 'weld') {        // weld bead: a row of little bright blobs
+      ctx.fillStyle = '#9a948a'; for (let j = 0; j < 4; j++) { ctx.beginPath(); ctx.arc(j * 1.1 * k, Math.sin(j * 2) * 0.3 * k, 0.65 * k, 0, Math.PI * 2); ctx.fill(); }
+    } else if (sc.type === 'plate') { // mismatched plate: a patch in the wrong colour, with rivets
+      ctx.fillStyle = ['#6a5a3a', '#4a5a6a', '#5a4a4a'][i % 3]; ctx.fillRect(-0.4 * k, -1.2 * k, 3.6 * k, 2.6 * k);
+      ctx.fillStyle = '#c4cbd0'; for (const [rx, ry] of [[0.1, -0.8], [2.8, -0.8], [0.1, 1], [2.8, 1]]) ctx.fillRect(rx * k, ry * k, 0.4 * k, 0.4 * k);
+    } else {                         // taped wire: a strip of black tape round a line
+      ctx.strokeStyle = '#b8743a'; ctx.lineWidth = 0.4 * k; ctx.beginPath(); ctx.moveTo(-1.5 * k, 0); ctx.lineTo(4.5 * k, 0.4 * k); ctx.stroke();
+      ctx.fillStyle = '#16181a'; ctx.fillRect(0.6 * k, -0.7 * k, 1.8 * k, 1.5 * k);
+    }
+    ctx.restore();
+  });
+}
+// A jagged crack across a box (seeded so it doesn't jump around)
+function drawCrack(x, y, w, h, seed) {
+  ctx.strokeStyle = 'rgba(10,10,10,0.9)'; ctx.lineWidth = 0.5; ctx.beginPath();
+  let cx = x + w * 0.2, cy = y + h * 0.15; ctx.moveTo(cx, cy);
+  for (let i = 1; i <= 5; i++) { cx = x + w * (0.2 + i * 0.13); cy = y + h * (0.15 + 0.7 * ((Math.sin(seed * 7 + i * 3.1) + 1) / 2)); ctx.lineTo(cx, cy); }
+  ctx.stroke();
+}
+// The porthole: dark glass, a crack and a drip line when it's broken (W-51)
+function drawWindow() {
+  const [x, y] = WINDOW_POS, r = WINDOW_R, wp = parts.window;
+  ctx.fillStyle = '#20272b'; ctx.beginPath(); ctx.arc(x, y, r + 1.2, 0, Math.PI * 2); ctx.fill();
+  const gr = ctx.createRadialGradient(x - 1.5, y - 1.5, 0, x, y, r); gr.addColorStop(0, '#1d4250'); gr.addColorStop(1, '#061218');
+  ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#a8a39a'; for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3; ctx.beginPath(); ctx.arc(x + Math.cos(a) * (r + 0.6), y + Math.sin(a) * (r + 0.6), 0.35, 0, Math.PI * 2); ctx.fill(); }
+  drawScars(wp, x - r - 2, y + r - 1, 2 * r + 4, 3, 0.8);
+  if (wp.fail) {
+    ctx.strokeStyle = 'rgba(200,225,230,0.6)'; ctx.lineWidth = 0.35; ctx.beginPath();
+    ctx.moveTo(x - 3, y - 2); ctx.lineTo(x, y + 0.5); ctx.lineTo(x + 3.5, y - 1); ctx.moveTo(x, y + 0.5); ctx.lineTo(x - 0.5, y + 4); ctx.stroke();
+    ctx.fillStyle = 'rgba(120,190,210,0.6)'; for (let i = 0; i < 3; i++) { const k = (time * 1.3 + i / 3) % 1; ctx.fillRect(x - 0.4 + i * 0.3, y + r + k * 14, 0.6, 1.2); }
+  }
 }
 // One body of water: fill from its tilted, wavy surface down, clipped to its room
 const waveY = (x, surfAt) => surfAt(x) + Math.sin(x * 0.3 + time * 3) * 0.5 + Math.sin(x * 0.11 - time * 1.7) * 0.4;
@@ -2136,7 +2386,7 @@ function drawFigure() {
     // Hand (grips show as a ring) and whatever it carries
     ctx.beginPath(); ctx.arc(hand.x, hand.y, 1.8, 0, Math.PI * 2); ctx.fill();
     if (grip) { ctx.strokeStyle = '#fa3'; ctx.lineWidth = 0.8; ctx.beginPath(); ctx.arc(hand.x, hand.y, 3.5, 0, Math.PI * 2); ctx.stroke(); }
-    if (isItem(carry)) drawItemIcon(carry.type, hand.x, hand.y);
+    if (isItem(carry)) { if (cnt(carry) > 1) drawItemIcon(carry.type, hand.x + 1.6, hand.y - 1.6); drawItemIcon(carry.type, hand.x, hand.y); }
     else if (carry) { rect([hand.x - 7, hand.y - 3, 14, 6], MODULE_COLORS[carry.id], carry.broken ? '#f33' : '#9fc'); ctx.font = '4px monospace'; label(carry.id, hand.x, hand.y + 1.4, '#dfe'); }
   }
   ctx.lineCap = 'butt';
@@ -2221,7 +2471,7 @@ function lightsList(dt) {
     else add(...WHEEL_POS, 18, [255, 170, 60], 0.9);
   } else {
     // Damaged rooms strobe red even with power on
-    const crewHurt = parts.panel.broken || parts.storage.broken || parts.pumpMech.broken || parts.pumpMech.dead || modules.some(m => m.broken && m.slot >= 0);
+    const crewHurt = parts.panel.broken || parts.storage.broken || parts.pumpMech.broken || parts.pumpMech.dead;
     if (crewHurt) add(60, -30, 95, [255, 40, 30], 0.42 * strobe());
     if (parts.propeller.broken) add(-80, -30, 60, [255, 40, 30], 0.42 * strobe());
   }
@@ -2508,7 +2758,6 @@ function drawSonarScreen(L) {
     ctx.fillStyle = '#e44';
     if (!sys.sonar) ctx.fillText('SONAR SWITCHED OFF  [1]', cx, cy - R * 0.55);
     else if (s.slot < 0 || s.carried) { ctx.font = '12px monospace'; ctx.fillText('NO DIRECTIONAL MODULE - RMB STILL PINGS ALL AROUND', cx, cy - R * 0.55); ctx.font = 'bold 16px monospace'; }
-    else if (s.broken) ctx.fillText('SONAR MODULE BROKEN', cx, cy - R * 0.55);
     if (phase === 'dock') { ctx.fillStyle = '#9cf'; ctx.fillText('DOCKED', cx, cy + R * 0.6); }
   }
   ctx.restore();
@@ -2544,11 +2793,11 @@ function renderTerminal(L) {
   const line = (t, c) => { ctx.fillStyle = c; ctx.fillText(t, x + 10, ly); ly += 16; };
   line('ENGINE TERMINAL', '#5f9');
   if (engine.report) {
-    const mal = engine.report === 'malfunction';
+    const mal = engine.report === 'malfunction' || engine.report === 'fault', ep = parts.engine;
     ctx.font = 'bold 26px monospace'; ctx.fillStyle = mal ? '#f33' : '#fc3';
     ctx.fillText(mal ? 'X' : engine.report === 'prevention' ? '!' : '0', x + 10, ly + 14);
     ctx.font = 'bold 12px monospace';
-    ctx.fillText(mal ? 'ENGINE MALFUNCTION' : engine.report === 'prevention' ? 'ENGINE MALFUNCTION PREVENTION' : 'FUEL EXHAUSTED', x + 36, ly + 8);
+    ctx.fillText(mal ? (ep.fail || (ep.wire.broken ? 'C-71' : '')) : engine.report === 'prevention' ? 'ENGINE MALFUNCTION PREVENTION' : 'FUEL EXHAUSTED', x + 36, ly + 8);
     ctx.font = '12px monospace'; ly += 26;
   }
   if (!power()) {
@@ -2568,24 +2817,24 @@ function renderTerminal(L) {
   ly += 24;
   // Horn: fires on compressed air, so it works without power (but not with a frozen panel)
   {
-    const h = mod('HORN'), ok = h.slot >= 0 && !h.carried && !h.broken, bw = w - 20;
+    const h = mod('HORN'), ok = h.slot >= 0 && !h.carried, bw = w - 20;
     const live = ok && h.loaded > 0;
     ctx.fillStyle = live ? '#432' : '#222'; ctx.fillRect(x + 10, ly - 12, bw, 18);
     ctx.fillStyle = live ? '#fa4' : '#777';
-    ctx.fillText(`[Q] FIRE HORN  ${h.loaded > 0 ? 'LOADED' : 'EMPTY'} +${charges()}  ${!ok ? (h.broken ? 'MODULE BROKEN' : 'NOT INSTALLED') : SLOTS[h.slot].name + ' SIDE'}`, x + 14, ly + 1);
+    ctx.fillText(`[Q] FIRE HORN  ${h.loaded > 0 ? 'LOADED' : 'EMPTY'} +${charges()}  ${!ok ? 'NOT INSTALLED' : SLOTS[h.slot].name + ' SIDE'}`, x + 14, ly + 1);
     termButtons.push({ id: 'horn', x: x + 10, y: ly - 12, w: bw, h: 18 });
     ly += 24;
   }
   if (pumpSpark > 0) line('PUMP RUNNING DRY!', Math.floor(time * 8) % 2 ? '#ff5' : '#e44');
   // Slots
-  line('SLOTS: ' + SLOTS.map((s, i) => { const m = moduleIn(i); return `${s.name}=${m ? m.id + (m.broken ? '!' : '') : '-'}`; }).join(' '), '#8ca');
+  line('SLOTS: ' + SLOTS.map((s, i) => { const m = moduleIn(i); return `${s.name}=${m ? m.id : '-'}`; }).join(' '), '#8ca');
+  const codes = activeCodes(); line(codes.length ? 'CODES: ' + codes.join(' ') : 'CODES: --', codes.length ? '#f55' : '#4c8');
   const bad = [];
   if (parts.propeller.broken) bad.push('PROPELLER DEAD'); else if (parts.propeller.bumps) bad.push(`PROPELLER ${parts.propeller.bumps}/${PROP_BUMPS}`);
   if (parts.panel.broken) bad.push('PANEL FROZEN'); else if (parts.panel.worn) bad.push('panel dmg');
   if (parts.storage.broken) bad.push('STORAGE'); else if (parts.storage.worn) bad.push('storage dmg');
   if (parts.pumpMech.dead) bad.push('PUMP GONE'); else if (parts.pumpMech.broken) bad.push('PUMP'); else if (parts.pumpMech.worn) bad.push('pump dmg');
   if (arm.broken) bad.push('ARM'); else if (arm.hits) bad.push(`ARM ${arm.hits}/${ARM_MAX_HITS}`);
-  for (const m of modules) if (m.broken) bad.push(m.id + ' MODULE'); else if (m.worn) bad.push(m.id.toLowerCase() + ' dmg');
   line(bad.length ? 'DAMAGE: ' + bad.join(', ') : 'DAMAGE: NONE', bad.length ? '#fa3' : '#4c8');
   ly += 6; line('-- LOG --', '#5f9');
   const room = Math.floor((y + h - ly) / 16);
@@ -2602,7 +2851,7 @@ function snapshotMonitors() {
 // Storage window: stored modules and stored items (grouped by type) as cards; click one to take it in your hand
 function drawInventory() {
   const W = cv.width, H = cv.height;
-  const cards = [...modules.filter(m => m.slot < 0 && !m.carried).map(m => ({ m, label: m.id, sub: m.broken ? 'BROKEN' : 'MODULE', bad: m.broken })),
+  const cards = [...modules.filter(m => m.slot < 0 && !m.carried).map(m => ({ m, label: m.id, sub: 'MODULE' })),
                  ...Object.keys(ITEM_TYPES).filter(t => storedOf(t)).map(t => ({ type: t, label: `${ITEM_TYPES[t].short} x${storedOf(t)}`,
                    sub: t === 'CHARGE' && storageLeaking() ? 'LEAKING!' : t === 'CHARGE' && storedCharges().some(c => c.gas < 0.99) ? 'ONE PART EMPTY' : ITEM_TYPES[t].name,
                    bad: t === 'CHARGE' && storageLeaking() }))];
@@ -2610,7 +2859,7 @@ function drawInventory() {
   ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, W, H);
   rect([x, y, w, h], '#2a1f10', '#a0601a');
   ctx.textAlign = 'left'; ctx.font = 'bold 14px monospace'; ctx.fillStyle = '#ffb040'; ctx.fillText('STORAGE', x + 14, y + 24);
-  ctx.font = '12px monospace'; ctx.fillStyle = '#ddd'; ctx.fillText(`SPARE PARTS + GAS ${storedParts()}/${MAX_PARTS}    HORN CHARGES ${charges()}`, x + 14, y + 44);
+  ctx.font = '12px monospace'; ctx.fillStyle = '#ddd'; ctx.fillText(`KINDS ${storedTypes()}/${MAX_ITEM_TYPES}    HORN CHARGES ${charges()}`, x + 14, y + 44);
   invButtons = [];
   cards.forEach((c, i) => {
     const bx = x + 14 + i * (cw + 10), by = y + 62;
@@ -2625,24 +2874,43 @@ function drawInventory() {
   });
   ctx.textAlign = 'left';
   if (!cards.length) { ctx.fillStyle = '#888'; ctx.fillText('empty', x + 14, y + 110); }
-  ctx.fillStyle = '#aaa'; ctx.font = '12px monospace'; ctx.fillText('click something to take it in your hand   -   E / click outside to close', x + 14, y + h - 14);
+  ctx.fillStyle = '#aaa'; ctx.font = '12px monospace'; ctx.fillText('click: take one (same kind again: hold 2)   -   E / click outside to close', x + 14, y + h - 14);
 }
-// The repair minigame window (screen space, low over the middle of the screen)
+// The repair minigame window (screen space, low over the middle of the screen). For an inspect panel it also shows
+// the part's power lamp on top and its scars, and the minigame is greyed out unless it can actually run.
 function drawFix() {
   if (!fix) return;
-  const L = fixLayout(), { x, y, w, h, tx, tw } = L;
+  const L = fixLayout(), { x, y, w, h, tx, tw } = L, panel = !!fix.panel;
+  // What to draw in the game area: the running game, or (panel, locked) the part's own game, greyed and still
+  const home = panel ? CLOSEUP_GAME[fix.panel] : fix.game;
+  const f = fix.game ? fix : { ...freshGame(home, fix.panel === 'engine' ? RIVETS + 1 : RIVETS), zone: 0.5, pos: 0.5, guide: 0.5, fx: 0.5 };
   ctx.save();
-  rect([x, y, w, h], 'rgba(16,14,11,0.94)', fix.miss > 0 ? '#f44' : '#a0601a');
-  ctx.textAlign = 'center'; ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#ffb040';
-  ctx.fillText(`REPAIR: ${fix.name}`, x + w / 2, y + 20);
+  if (panel) {
+    // Close-up frame in the storage window's style: the part itself + its status on top, the minigame area below
+    drawPowerLamp(fix.panel, x + w / 2, L.top);
+    rect([x, L.top, w, CLOSEUP_H + h], '#2a1f10', fix.miss > 0 ? '#f44' : '#a0601a');
+    ctx.textAlign = 'left'; ctx.font = 'bold 14px monospace'; ctx.fillStyle = '#ffb040'; ctx.fillText(fix.name, x + 14, L.top + 22);
+    drawCloseup(fix.panel, x, L.top, w);
+    rect([x + 8, y, w - 16, h - 4], '#16120c', '#5a4020');
+  } else {
+    rect([x, y, w, h], 'rgba(16,14,11,0.94)', fix.miss > 0 ? '#f44' : '#a0601a');
+    ctx.textAlign = 'center'; ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#ffb040';
+    ctx.fillText(`REPAIR: ${fix.name}`, x + w / 2, y + 20);
+  }
+  ctx.textAlign = 'center';
+  if (!f.game) {   // breaker, hull: nothing to repair in here (the breaker's hold action still shows)
+    ctx.fillStyle = 'rgba(14,14,14,0.72)'; ctx.fillRect(x + 9, y + 1, w - 18, h - 18);
+    if (!fix.ha) { ctx.font = '11px monospace'; ctx.fillStyle = '#5a5040'; ctx.fillText('NOTHING TO WORK ON HERE', x + w / 2, y + 86); }
+  }
   ctx.font = '11px monospace'; ctx.fillStyle = '#bbb';
-  ctx.fillText({ rivet: 'E / CLICK WHEN THE MARKER IS IN THE GREEN', screw: 'CIRCLE THE MOUSE CLOCKWISE AROUND THE NUT',
-                 filter: 'MOUSE: LINE IT UP UNDER THE GAP   HOLD E: PUSH' }[fix.game], x + w / 2, y + 37);
-  if (fix.game === 'rivet') {
+  if (f.game) ctx.fillText({ rivet: 'E / CLICK WHEN THE MARKER IS IN THE GREEN', screw: 'CIRCLE THE MOUSE CLOCKWISE AROUND THE NUT',
+                 filter: 'MOUSE: LINE IT UP UNDER THE GAP   HOLD E: PUSH' }[f.game], x + w / 2, y + 37);
+  if (!f.game) {}
+  else if (f.game === 'rivet') {
     // The patch plate and its rivets, then the timing bar
-    rect([x + w / 2 - fix.total * 19 - 6, y + 50, fix.total * 38 + 12, 40], fix.flash > 0 ? '#8a8270' : '#5a554a', '#2a2620');
-    for (let i = 0; i < fix.total; i++) {
-      const cx = x + w / 2 + (i - (fix.total - 1) / 2) * 38, cy = y + 70, done = i < fix.prog, cur = i === Math.floor(fix.prog);
+    rect([x + w / 2 - f.total * 19 - 6, y + 50, f.total * 38 + 12, 40], f.flash > 0 ? '#8a8270' : '#5a554a', '#2a2620');
+    for (let i = 0; i < f.total; i++) {
+      const cx = x + w / 2 + (i - (f.total - 1) / 2) * 38, cy = y + 70, done = i < f.prog, cur = i === Math.floor(f.prog);
       ctx.beginPath(); ctx.arc(cx, cy, 9, 0, Math.PI * 2);
       ctx.fillStyle = done ? '#c9c2b0' : '#141210'; ctx.fill();
       ctx.lineWidth = cur ? 2 : 1; ctx.strokeStyle = cur ? `rgba(255,176,64,${0.5 + 0.5 * Math.sin(time * 8)})` : '#3a352d'; ctx.stroke();
@@ -2650,39 +2918,233 @@ function drawFix() {
     }
     const by = y + 104;
     rect([tx, by, tw, 16], '#1c1c1c', '#555');
-    rect([tx + (fix.zone - RIVET_ZONE / 2) * tw, by, RIVET_ZONE * tw, 16], '#2d7a3a');
-    rect([tx + fix.pos * tw - 2, by - 5, 4, 26], fix.miss > 0 ? '#f44' : '#fff');
-    ctx.fillStyle = '#aaa'; ctx.fillText(`RIVET ${Math.min(fix.prog + 1, fix.total)}/${fix.total}`, x + w / 2, by + 36);
-  } else if (fix.game === 'screw') {
+    rect([tx + (f.zone - RIVET_ZONE / 2) * tw, by, RIVET_ZONE * tw, 16], '#2d7a3a');
+    rect([tx + f.pos * tw - 2, by - 5, 4, 26], f.miss > 0 ? '#f44' : '#fff');
+    ctx.fillStyle = '#aaa'; ctx.fillText(`RIVET ${Math.min(f.prog + 1, f.total)}/${f.total}`, x + w / 2, by + 36);
+  } else if (f.game === 'screw') {
     // A pipe joint: the nut turns as you circle the mouse; a ring shows how tight it is
     const { nx, ny } = L;
     rect([tx, ny - 8, tw, 16], '#3e4a52', '#1c2226');
-    if (fix.prog < 1) { ctx.fillStyle = 'rgba(150,200,220,0.6)'; for (let i = 0; i < 8; i++) { const k = (time * 3 + i / 8) % 1; ctx.fillRect(nx + 26 + k * 40 * (1 - fix.prog), ny - 10 - k * 18 + Math.sin(i * 7) * 6, 2, 2); } }
+    if (fix.game && f.prog < 1) { ctx.fillStyle = 'rgba(150,200,220,0.6)'; for (let i = 0; i < 8; i++) { const k = (time * 3 + i / 8) % 1; ctx.fillRect(nx + 26 + k * 40 * (1 - f.prog), ny - 10 - k * 18 + Math.sin(i * 7) * 6, 2, 2); } }
     ctx.lineWidth = 6; ctx.strokeStyle = '#2a2a2a'; ctx.beginPath(); ctx.arc(nx, ny, 38, 0, Math.PI * 2); ctx.stroke();
-    ctx.strokeStyle = '#4c8'; ctx.beginPath(); ctx.arc(nx, ny, 38, -Math.PI / 2, -Math.PI / 2 + fix.prog * Math.PI * 2); ctx.stroke();
-    ctx.save(); ctx.translate(nx, ny); ctx.rotate(fix.prog * SCREW_TURNS * Math.PI * 2);
+    ctx.strokeStyle = '#4c8'; ctx.beginPath(); ctx.arc(nx, ny, 38, -Math.PI / 2, -Math.PI / 2 + f.prog * Math.PI * 2); ctx.stroke();
+    ctx.save(); ctx.translate(nx, ny); ctx.rotate(f.prog * SCREW_TURNS * Math.PI * 2);
     ctx.beginPath(); for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3; ctx.lineTo(Math.cos(a) * 22, Math.sin(a) * 22); } ctx.closePath();
     ctx.fillStyle = '#8a8f94'; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = '#2a2e32'; ctx.stroke();
     ctx.fillStyle = '#2a2e32'; ctx.fillRect(-2, -20, 4, 8);   // a mark so you can see it turn
     ctx.beginPath(); ctx.arc(0, 0, 8, 0, Math.PI * 2); ctx.fillStyle = '#3e4a52'; ctx.fill();
     ctx.restore();
-    ctx.fillStyle = '#aaa'; ctx.fillText(`${Math.round(fix.prog * 100)}% TIGHT`, x + w / 2, y + h - 26);
+    ctx.fillStyle = '#aaa'; ctx.fillText(`${Math.round(f.prog * 100)}% TIGHT`, x + w / 2, y + h - 26);
   } else {
     // The filter housing: a gap in the rail drifts about; the cartridge follows the mouse and rises as you push
-    const ry = y + 52, gx = tx + fix.guide * tw, cw = 2 * FILTER_SLACK * tw * 0.8;
+    const ry = y + 52, gx = tx + f.guide * tw, cw = 2 * FILTER_SLACK * tw * 0.8;
     rect([tx, ry, tw, 10], '#3a3a3a', '#222');
     rect([gx - cw / 2, ry, cw, 10], '#050505'); rect([gx - cw / 2 - 2, ry - 3, 2, 16], '#4c8'); rect([gx + cw / 2, ry - 3, 2, 16], '#4c8');
-    const fxp = tx + fix.fx * tw, fy = ry + 14 + (1 - fix.prog) * 46;
+    const fxp = tx + f.fx * tw, fy = ry + 14 + (1 - f.prog) * 46;
     ctx.save(); ctx.translate(fxp, fy);
-    rect([-cw / 2 + 3, 0, cw - 6, 30], '#3f5a4a', fix.on ? '#4c8' : '#f55');
+    rect([-cw / 2 + 3, 0, cw - 6, 30], '#3f5a4a', f.on ? '#4c8' : '#f55');
     ctx.strokeStyle = 'rgba(190,230,200,0.4)'; ctx.lineWidth = 1; ctx.beginPath();
     for (let i = -cw / 2 + 8; i < cw / 2 - 4; i += 6) { ctx.moveTo(i, 3); ctx.lineTo(i, 27); } ctx.stroke();
     ctx.restore();
-    rect([tx, y + h - 36, tw, 6], '#222'); rect([tx, y + h - 36, tw * fix.prog, 6], '#4c8');
+    rect([tx, y + h - 36, tw, 6], '#222'); rect([tx, y + h - 36, tw * f.prog, 6], '#4c8');
+  }
+  if (panel && !fix.game) {
+    // Locked: grey it out. A hold action (restart, pour, load, breaker, free dock repair) shows on top of it.
+    if (f.game) { ctx.fillStyle = 'rgba(14,14,14,0.72)'; ctx.fillRect(x + 9, y + 28, w - 18, h - 46); }
+    if (fix.ha) {
+      ctx.fillStyle = '#e8d8b0'; ctx.font = 'bold 12px monospace'; ctx.fillText(fix.ha.label, x + w / 2, y + 86);
+      rect([x + w / 2 - 80, y + 96, 160, 6], '#222'); rect([x + w / 2 - 80, y + 96, 160 * clamp(fix.holdT / fix.ha.time, 0, 1), 6], '#fa3');
+    }
   }
   ctx.font = '10px monospace'; ctx.fillStyle = '#777';
-  ctx.fillText('A/D or ESC: STOP (PROGRESS IS KEPT)', x + w / 2, y + h - 10);
+  ctx.fillText(panel ? 'E or CLICK OUTSIDE: CLOSE' : 'A/D or ESC: STOP (PROGRESS IS KEPT)', x + w / 2, y + h - 10);
   ctx.restore();
+}
+// The lamp above a part's panel: GREEN = power reaches the part, dark = it doesn't. Flickers when its wire is wet.
+// The window has no wire, so no lamp.
+function drawPowerLamp(name, cx, y) {
+  if (name === 'window' || name === 'hull' || name === 'storage') return;   // nothing electric in them
+  const on = PART_LIST.includes(name) ? batteryAlive() && partPowered(name) : power();
+  rect([cx - 22, y - 22, 44, 22], '#2a2d30', '#111');
+  ctx.beginPath(); ctx.arc(cx, y - 11, 7, 0, Math.PI * 2); ctx.fillStyle = on ? '#3f6' : '#0d140f'; ctx.fill();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = '#555'; ctx.stroke();
+  if (on) { ctx.save(); ctx.globalCompositeOperation = 'lighter'; const gr = ctx.createRadialGradient(cx, y - 11, 0, cx, y - 11, 22); gr.addColorStop(0, 'rgba(80,255,120,0.5)'); gr.addColorStop(1, 'rgba(80,255,120,0)'); ctx.fillStyle = gr; ctx.fillRect(cx - 22, y - 33, 44, 44); ctx.restore(); }
+}
+// ----- Close-ups: the only place real status lives -----
+// closeupState() reads a part's real internal state. The close-up draws ONLY from it, and F3 prints the same object,
+// so what you see always matches what the game is doing. No smoothing, no fake values.
+const batteryCharge = () => power() || gen.boot > 0 ? 1 : clamp(1 - darkT / RED_LIGHT_TIME, 0, 1);   // same clock batteryAlive() uses
+function closeupState(name) {
+  const c = PART_LIST.includes(name) ? P(name) : null;
+  const base = c ? { fail: c.fail, worn: !!c.worn, wear: c.wear, scars: c.scars.length, ...(WIRED.includes(name) ? { wireWet: c.wire.wet, wireOff: c.wire.off, wireBroken: c.wire.broken } : {}) } : {};
+  switch (name) {
+    case 'engine':  return { ...base, state: engine.state, report: engine.report, stopIn: engine.stopIn, running: engine.state === 'running', stalled: !!(c.fail || c.wire.broken), throttle: Math.hypot(throttle.x, throttle.y) };
+    case 'breaker': return { genOn: gen.on, boot: gen.boot, power: power(), darkT, charge: batteryCharge(), generatorRunning: engine.state === 'running', gas: fuel };
+    case 'pump':    return { ...base, running: pumpRunning(), sysPump: sys.pump, slot: c.slot, inFloorSlot: c.slot === FLOOR_SLOT && !c.carried, water, dry: pumpSpark > 0 };
+    case 'air':     return { ...base, running: airMaking(), slot: c.slot, under: c.under, submerged: submerged('air') };
+    case 'sonar':   return { ...base, on: sonarWorks(), sysSonar: sys.sonar, slot: c.slot, burnt: c.fail === 'S-31' };
+    case 'horn':    return { ...base, loaded: c.loaded, slot: c.slot };
+    case 'window':  return { ...base, glass: c.fail ? 'leaking' : c.worn ? 'cracked' : 'intact' };
+    case 'hull':    return { hp: sub.hp, hits: Math.round((MAX_HP - sub.hp) / HIT_DAMAGE), patches: sub.patches, seeping: phase === 'dive' && sub.hp / MAX_HP < HULL_LEAK_FROM };
+    case 'storage': return { broken: parts.storage.broken, worn: !!parts.storage.worn, leaking: storageLeaking(), scars: parts.storage.scars.length,
+                             contents: Object.fromEntries(Object.keys(ITEM_TYPES).filter(t => storedOf(t)).map(t => [t, storedOf(t)])),
+                             modules: modules.filter(m => m.slot < 0 && !m.carried).map(m => m.id) };
+    case 'panel':   return { broken: parts.panel.broken, worn: !!parts.panel.worn, power: power(), scars: parts.panel.scars.length };
+  }
+  return {};
+}
+// Status widgets: a lamp with a label, a needle gauge, a sight glass. No numbers.
+function cuLamp(x, y, label, on, col = '#3f6') {
+  ctx.beginPath(); ctx.arc(x + 6, y - 4, 5, 0, Math.PI * 2); ctx.fillStyle = on ? col : '#1b1a17'; ctx.fill();
+  ctx.lineWidth = 1; ctx.strokeStyle = '#555'; ctx.stroke();
+  ctx.font = '11px monospace'; ctx.textAlign = 'left'; ctx.fillStyle = on ? '#e8e0cc' : '#6a6050'; ctx.fillText(label, x + 16, y);
+}
+function cuNeedle(cx, cy, r, f, label) {
+  const a0 = Math.PI + 0.35, a1 = 2 * Math.PI - 0.35, a = a0 + clamp(f, 0, 1) * (a1 - a0);
+  ctx.beginPath(); ctx.arc(cx, cy, r, a0, a1); ctx.lineWidth = 6; ctx.strokeStyle = '#1b1a17'; ctx.stroke();
+  ctx.lineWidth = 1; ctx.strokeStyle = '#8a7a5a';
+  for (let i = 0; i <= 4; i++) { const t = a0 + i / 4 * (a1 - a0); ctx.beginPath(); ctx.moveTo(cx + Math.cos(t) * (r - 3), cy + Math.sin(t) * (r - 3)); ctx.lineTo(cx + Math.cos(t) * (r + 3), cy + Math.sin(t) * (r + 3)); ctx.stroke(); }
+  ctx.beginPath(); ctx.moveTo(cx + Math.cos(a0) * (r + 4), cy + Math.sin(a0) * (r + 4)); ctx.lineTo(cx + Math.cos(a0) * (r - 4), cy + Math.sin(a0) * (r - 4)); ctx.strokeStyle = '#c33'; ctx.lineWidth = 2; ctx.stroke();   // empty mark
+  ctx.strokeStyle = '#f0e0b0'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(a) * (r - 2), cy + Math.sin(a) * (r - 2)); ctx.stroke();
+  ctx.fillStyle = '#5a5040'; ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.font = '10px monospace'; ctx.textAlign = 'center'; ctx.fillStyle = '#a89a78'; ctx.fillText(label, cx, cy + 14);
+}
+function cuTube(x, y, w, h, f, mark, label) {
+  rect([x, y, w, h], '#0c0f10', '#6a6050');
+  rect([x + 2, y + h - 2 - (h - 4) * clamp(f, 0, 1), w - 4, (h - 4) * clamp(f, 0, 1)], '#2a6a88');
+  ctx.fillStyle = '#e0a040'; ctx.fillRect(x - 3, y + h - 2 - (h - 4) * mark - 1, w + 6, 2);   // the pump's intake
+  ctx.font = '10px monospace'; ctx.textAlign = 'center'; ctx.fillStyle = '#a89a78'; ctx.fillText(label, x + w / 2, y + h + 12);
+}
+// Lamps where exactly one of the set is lit
+function cuLamps(x, y, opts, lit) { opts.forEach(([label, col], i) => cuLamp(x, y + i * 17, label, i === lit, col)); }
+// The close-up: the part drawn big (with its scars, dents and cracks) on the left, its status on the right
+function drawCloseup(name, x, top, w) {
+  const S = closeupState(name), bx = x + 14, by = top + 34, sx = x + 236, sy = top + 50, k = 2;
+  rect([bx - 2, by - 2, 204, 110], '#0d0b08', '#5a4020');
+  ctx.save(); ctx.beginPath(); ctx.rect(bx, by, 200, 106); ctx.clip(); ctx.translate(bx, by); ctx.scale(k, k);
+  drawCloseupPicture(name, S);
+  ctx.restore();
+  ctx.save();
+  const R = '#e44', G = '#3f6', A = '#fb3', B = '#4af';
+  switch (name) {
+    case 'engine':  cuLamps(sx, sy, [['RUNNING', G], ['OFF', A], ['STALLED / BROKEN', R]], S.stalled ? 2 : S.running ? 0 : 1);
+                    cuNeedle(sx + 150, sy + 64, 26, S.running ? 0.15 + 0.85 * S.throttle : 0, 'REVS'); break;
+    case 'breaker': cuNeedle(sx + 32, sy + 22, 24, S.charge, 'CHARGE'); cuNeedle(sx + 120, sy + 22, 24, S.gas, 'GAS');
+                    cuLamp(sx, sy + 56, 'GENERATOR RUNNING', S.generatorRunning); cuLamp(sx, sy + 73, 'BREAKER ON', S.genOn); cuLamp(sx, sy + 90, 'BOOTING', S.boot > 0, A); break;
+    case 'pump':    cuLamps(sx, sy, [['RUNNING', G], ['OFF', A]], S.running ? 0 : 1);
+                    cuLamp(sx, sy + 34, 'RUNNING DRY', S.dry && Math.floor(time * 6) % 2 === 0, R);
+                    cuTube(sx + 170, sy - 12, 18, 84, S.water, 0.02, 'WATER'); break;
+    case 'air':     cuLamps(sx, sy, [['RUNNING', G], ['OFF', A]], S.running ? 0 : 1); cuLamp(sx, sy + 34, 'UNDER WATER', S.submerged, B); break;
+    case 'sonar':   cuLamps(sx, sy, [['ON', G], ['OFF', A], ['BURNT', R]], S.burnt ? 2 : S.on ? 0 : 1); break;
+    case 'horn':    cuNeedle(sx + 40, sy + 22, 26, S.loaded, 'PRESSURE'); cuLamp(sx, sy + 56, 'CHARGE LOADED', S.loaded > 0, A); break;
+    case 'window':  cuLamps(sx, sy, [['GLASS INTACT', G], ['CRACKED', A], ['LEAKING', R]], ['intact', 'cracked', 'leaking'].indexOf(S.glass)); break;
+    case 'hull':    cuLamp(sx, sy, 'SEEPING', S.seeping, B); break;
+    case 'storage': cuLamp(sx, sy, 'RACK HISSING', S.leaking, R); break;
+    case 'panel':   cuLamps(sx, sy, [['LIVE', G], ['FROZEN', R], ['DARK', A]], S.broken ? 1 : S.power ? 0 : 2); break;
+  }
+  ctx.restore();
+}
+// Each part drawn big, in a 100 x 53 box (scaled 2x). Everything visible here is real state: wear, dents (the silent
+// first hit), cracks, scars, water.
+function drawCloseupPicture(name, S) {
+  const scars = PART_LIST.includes(name) ? P(name).scars : name === 'storage' || name === 'panel' ? parts[name].scars : [];
+  const dent = (x, y) => { const gr = ctx.createRadialGradient(x, y, 0, x, y, 7); gr.addColorStop(0, 'rgba(0,0,0,0.6)'); gr.addColorStop(1, 'rgba(0,0,0,0)'); ctx.fillStyle = gr; ctx.fillRect(x - 7, y - 7, 14, 14); };
+  const impact = S.fail && FAILS[S.fail] && FAILS[S.fail].kind === 'impact';
+  ctx.lineWidth = 0.6;
+  if (name === 'engine') {
+    paintedBox(boxPts([4, 4, 92, 45]), '#33204a', 0.4);
+    [[26, 22, 10], [52, 19, 9], [76, 24, 8]].forEach(([gx, gy, r], i) => {
+      ctx.fillStyle = '#120c18'; ctx.beginPath(); ctx.arc(gx, gy, r, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#5c4870'; ctx.stroke();
+      const a = S.running ? -0.6 + Math.sin(time * 3 + i) * 0.3 + (Math.random() - 0.5) * 0.1 : 0.7;
+      ctx.strokeStyle = S.running ? '#d9c070' : '#4a4030'; ctx.beginPath(); ctx.moveTo(gx, gy); ctx.lineTo(gx + Math.cos(a) * r * 0.8, gy + Math.sin(a) * r * 0.8); ctx.stroke();
+    });
+    pipe(4, 42, 96, 42, 2.2, 14);
+  } else if (name === 'breaker') {
+    paintedBox(boxPts([6, 5, 34, 43]), '#1d2226', 0.4);
+    rect([18, 10, 10, 33], '#0a0c0d'); rect([16, S.genOn ? 11 : 30, 14, 10], S.genOn ? '#3a9a62' : '#a83232', '#000');
+    paintedBox(boxPts([48, 12, 46, 30]), '#2a2a22', 0.3);
+    for (let i = 0; i < 4; i++) rect([52 + i * 10.5, 17, 8, 20], i < Math.ceil(S.charge * 4) ? '#5a8a3a' : '#141812', '#000');   // battery cells
+    cable(40, 26, 48, 26, 3);
+  } else if (name === 'pump') {
+    paintedBox(boxPts([4, 10, 62, 36]), '#1d2850', 0.4);
+    ctx.save(); ctx.translate(34, 28); ctx.rotate(S.running ? time * 9 : 0.3);
+    ctx.fillStyle = '#0a0e18'; ctx.beginPath(); ctx.arc(0, 0, 13, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#7a8ab8'; ctx.lineWidth = 1.4; for (let i = 0; i < 5; i++) { const a = i * Math.PI * 0.4; ctx.beginPath(); ctx.moveTo(0, 0); ctx.quadraticCurveTo(Math.cos(a) * 8, Math.sin(a) * 8 + 3, Math.cos(a + 0.5) * 12, Math.sin(a + 0.5) * 12); ctx.stroke(); }
+    ctx.restore(); ctx.lineWidth = 0.6;
+    pipe(66, 22, 98, 22, 3, 10);
+    if (S.water > 0.003) { ctx.fillStyle = 'rgba(30,90,120,0.55)'; ctx.fillRect(0, 53 - Math.min(53, 6 + S.water * 47), 100, 53); }   // water around it
+  } else if (name === 'air') {
+    paintedBox(boxPts([4, 4, 92, 45]), '#1b2e2e', 0.35);
+    ctx.save(); ctx.translate(27, 27); ctx.rotate(S.running ? time * 12 : 0.4);
+    ctx.fillStyle = '#0a1414'; ctx.beginPath(); ctx.arc(0, 0, 16, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#4a6a6a'; for (let i = 0; i < 4; i++) { ctx.rotate(Math.PI / 2); ctx.beginPath(); ctx.ellipse(7, 0, 7, 3, 0.3, 0, Math.PI * 2); ctx.fill(); }
+    ctx.restore();
+    // The filter: the dirtier it looks, the closer it is to clogging (A-11 = choked black)
+    rect([54, 8, 38, 37], '#3f5a4a', '#0a0c0e');
+    ctx.strokeStyle = 'rgba(190,230,200,0.5)'; ctx.beginPath(); for (let i = 58; i < 92; i += 4) { ctx.moveTo(i, 10); ctx.lineTo(i, 43); } for (let j = 12; j < 44; j += 4) { ctx.moveTo(55, j); ctx.lineTo(91, j); } ctx.stroke();
+    const clog = S.fail === 'A-11' ? 1 : S.wear;
+    ctx.fillStyle = 'rgba(30,22,12,0.85)'; for (let i = 0; i < Math.floor(clog * 70); i++) { const u = (Math.sin(i * 12.9898) * 43758.5) % 1, v = (Math.sin(i * 78.233) * 12543.1) % 1; ctx.fillRect(55 + Math.abs(u) * 34, 9 + Math.abs(v) * 33, 2.4, 2.4); }
+    if (clog >= 1) { ctx.fillStyle = 'rgba(20,14,8,0.8)'; ctx.fillRect(54, 8, 38, 37); }
+    if (S.submerged || S.fail === 'A-13') { ctx.fillStyle = 'rgba(30,90,120,0.5)'; ctx.fillRect(0, S.submerged ? 0 : 30, 100, 53); }
+  } else if (name === 'sonar') {
+    paintedBox(boxPts([4, 4, 92, 45]), '#1b2b22', 0.35);
+    ctx.fillStyle = '#2e3a34'; ctx.beginPath(); ctx.arc(50, 26, 20, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#0a0c0e'; ctx.stroke();
+    ctx.strokeStyle = S.on ? `rgba(120,255,200,${0.4 + 0.3 * Math.sin(time * 4)})` : '#3a4a42';
+    for (const r of [6, 11, 16]) { ctx.beginPath(); ctx.arc(50, 26, r, 0, Math.PI * 2); ctx.stroke(); }
+    if (S.burnt) { const gr = ctx.createRadialGradient(50, 26, 0, 50, 26, 18); gr.addColorStop(0, 'rgba(0,0,0,0.95)'); gr.addColorStop(0.7, 'rgba(40,20,5,0.7)'); gr.addColorStop(1, 'rgba(0,0,0,0)'); ctx.fillStyle = gr; ctx.fillRect(30, 6, 40, 40); }
+  } else if (name === 'horn') {
+    paintedBox(boxPts([4, 4, 92, 45]), '#2e2a1b', 0.3);
+    ctx.fillStyle = '#6a5a3a'; ctx.beginPath(); ctx.moveTo(34, 20); ctx.lineTo(90, 8); ctx.lineTo(90, 46); ctx.lineTo(34, 33); ctx.closePath(); ctx.fill(); ctx.strokeStyle = '#1a160c'; ctx.stroke();
+    rect([10, 14, 14, 26], S.loaded > 0 ? '#5a6a76' : '#2a2e32', '#0a0c0e'); rect([14, 10, 6, 4], '#4a4a4a');   // the charge bottle
+    pipe(24, 27, 34, 27, 2, 99);
+  } else if (name === 'window') {
+    ctx.fillStyle = '#20272b'; ctx.fillRect(0, 0, 100, 53);
+    ctx.fillStyle = '#3a4448'; ctx.beginPath(); ctx.arc(50, 26, 23, 0, Math.PI * 2); ctx.fill();
+    const gr = ctx.createRadialGradient(43, 19, 0, 50, 26, 20); gr.addColorStop(0, '#1d4250'); gr.addColorStop(1, '#061218'); ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(50, 26, 20, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#a8a39a'; for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4; ctx.beginPath(); ctx.arc(50 + Math.cos(a) * 21.5, 26 + Math.sin(a) * 21.5, 0.9, 0, Math.PI * 2); ctx.fill(); }
+    ctx.strokeStyle = 'rgba(210,235,240,0.7)'; ctx.lineWidth = 0.5;
+    if (S.glass !== 'intact') { ctx.beginPath(); ctx.moveTo(38, 16); ctx.lineTo(47, 25); ctx.lineTo(56, 22); ctx.stroke(); }   // hairline (the silent first hit)
+    if (S.glass === 'leaking') {
+      ctx.beginPath(); ctx.moveTo(47, 25); ctx.lineTo(44, 38); ctx.moveTo(47, 25); ctx.lineTo(62, 33); ctx.moveTo(56, 22); ctx.lineTo(64, 14); ctx.stroke();
+      ctx.fillStyle = 'rgba(120,190,210,0.7)'; for (let i = 0; i < 4; i++) { const k2 = (time * 1.3 + i / 4) % 1; ctx.fillRect(44 + i * 2, 38 + k2 * 15, 1, 2); }
+    }
+  } else if (name === 'hull') {
+    // Plates, rivets; a dent for every hit it's carrying, a mismatched patch for every repair it's had
+    for (let py = 0; py < 53; py += 26) for (let px = 0; px < 100; px += 50) {
+      rect([px + 0.5, py + 0.5, 49, 25], '#5a6268', '#20262a');
+      ctx.fillStyle = '#a8b0b4'; for (let i = 4; i < 50; i += 6) { ctx.fillRect(px + i, py + 2.5, 0.8, 0.8); ctx.fillRect(px + i, py + 22, 0.8, 0.8); }
+    }
+    for (let i = 0; i < S.patches; i++) { const u = Math.abs(Math.sin(i * 3.7 + 1)) * 80, v = Math.abs(Math.sin(i * 5.3 + 2)) * 38; rect([u + 4, v + 4, 14, 9], ['#6a5a3a', '#4a5a6a', '#5a4a4a'][i % 3], '#111'); ctx.fillStyle = '#c4cbd0'; for (const [rx, ry] of [[1, 1], [12, 1], [1, 7], [12, 7]]) ctx.fillRect(u + 4 + rx, v + 4 + ry, 0.8, 0.8); }
+    for (let i = 0; i < S.hits; i++) dent(8 + Math.abs(Math.sin(i * 7.1 + 4)) * 84, 6 + Math.abs(Math.sin(i * 2.9 + 3)) * 41);
+    if (S.seeping) { ctx.fillStyle = 'rgba(120,190,210,0.6)'; for (let i = 0; i < 6; i++) { const k2 = (time * 0.8 + i / 6) % 1; ctx.fillRect(10 + i * 16, k2 * 53, 0.8, 2.5); } }
+  } else if (name === 'storage') {
+    // Exactly what's inside: every piece, kind by kind (a row each), and spare modules on the bottom shelf
+    paintedBox(boxPts([0, 0, 100, 53]), '#3a2810', 0.35);
+    const kinds = Object.entries(S.contents);
+    ctx.font = '4px monospace'; ctx.textAlign = 'left';
+    kinds.forEach(([t, n], r) => {
+      const y = 5 + r * 6.6;
+      for (let i = 0; i < Math.min(n, 9); i++) { ctx.save(); ctx.translate(7 + i * 9.5, y); drawItemIcon(t, 0, 0); ctx.restore(); }
+      if (n > 9) { ctx.fillStyle = '#e8d8b0'; ctx.fillText(`+${n - 9}`, 90, y + 1.5); }
+    });
+    S.modules.forEach((id, i) => { rect([4 + i * 24, 45, 22, 6], MODULE_COLORS[id], '#9fc'); ctx.fillStyle = '#dfe'; ctx.fillText(id, 6 + i * 24, 49.5); });
+    if (!kinds.length && !S.modules.length) { ctx.fillStyle = '#7a6a50'; ctx.fillText('empty', 40, 28); }
+    if (S.leaking) { ctx.fillStyle = 'rgba(200,215,220,0.3)'; for (let i = 0; i < 6; i++) { const k2 = (time * 1.4 + i / 6) % 1; ctx.beginPath(); ctx.arc(20 + i * 12, 53 - k2 * 20, 1 + k2 * 3, 0, Math.PI * 2); ctx.fill(); } }
+    if (S.broken) drawCrack(6, 4, 88, 40, 5);
+  } else if (name === 'panel') {
+    paintedBox(boxPts([2, 2, 96, 49]), '#1f4426', 0.4);
+    for (const [px, py] of [[10, 8], [56, 8]]) {
+      rect([px, py, 34, 22], S.power && !S.broken ? '#0b3a22' : '#060808', '#000');
+      if (S.power && !S.broken) { ctx.fillStyle = 'rgba(120,255,180,0.7)'; for (let i = 0; i < 4; i++) ctx.fillRect(px + 3, py + 4 + i * 4.5, 6 + ((time * 3 + i + px) % 20), 1.2); }
+      else if (S.broken) { ctx.fillStyle = 'rgba(150,170,160,0.35)'; for (let i = 0; i < 4; i++) ctx.fillRect(px + 3, py + 4 + i * 4.5, 14 + i * 3, 1.2); }   // stuck as it was
+    }
+    for (let i = 0; i < 6; i++) rect([12 + i * 13, 38, 8, 5], S.power && !S.broken && Math.sin(time * 4 + i * 1.7) > 0 ? ['#4f4', '#fc3', '#4cf', '#f55', '#4f4', '#fc3'][i] : '#1a2020', '#000');
+    if (S.broken) drawCrack(8, 6, 84, 40, 9);
+  }
+  if (S.worn && !S.fail && name !== 'window') dent(70, 14);   // the silent first hit
+  if (impact && name !== 'window') drawCrack(10, 8, 80, 36, name.length);
+  // Scars from past repairs (the only history a part has)
+  if (scars.length) drawScars({ scars }, 6, 6, 88, 41, 2.2);
 }
 // Little pictures of the loose items (sub-local units, centred on x, y)
 function drawItemIcon(type, x, y) {
@@ -2698,6 +3160,14 @@ function drawItemIcon(type, x, y) {
   } else if (type === 'METAL') {  // a piece of metal: bent plate with bolt holes
     ctx.fillStyle = '#7a7268'; ctx.beginPath(); ctx.moveTo(-3.5, 1.5); ctx.lineTo(-2.5, -1.8); ctx.lineTo(3.2, -1.2); ctx.lineTo(3.6, 1.8); ctx.closePath(); ctx.fill(); ctx.stroke();
     ctx.fillStyle = '#1a1816'; for (const [bx, by] of [[-1.8, 0], [2, 0.3]]) { ctx.beginPath(); ctx.arc(bx, by, 0.45, 0, Math.PI * 2); ctx.fill(); }
+  } else if (type === 'COPPER') { // copper wire: a coil
+    ctx.strokeStyle = '#c87a3a'; ctx.lineWidth = 0.7;
+    for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.ellipse(-1.2 + i * 1.2, 0, 1.4, 2.4, 0, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.beginPath(); ctx.moveTo(2.2, 1.6); ctx.lineTo(4, 2.8); ctx.stroke();
+  } else if (type === 'TRANSDUCER') { // sonar transducer: a disc with a cone face
+    ctx.fillStyle = '#2e3a34'; ctx.beginPath(); ctx.arc(0, 0, 2.8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#8ab8a4'; ctx.beginPath(); ctx.arc(0, 0, 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#1a2420'; ctx.beginPath(); ctx.arc(0, 0, 0.6, 0, Math.PI * 2); ctx.fill();
   } else if (type === 'GAS') {    // gas canister: a red jerrycan with a spout
     ctx.fillStyle = '#8a2a1e'; ctx.fillRect(-2.6, -2.4, 5.2, 5.4); ctx.strokeRect(-2.6, -2.4, 5.2, 5.4);
     ctx.strokeStyle = 'rgba(255,200,180,0.35)'; ctx.beginPath(); ctx.moveTo(-2, -1.6); ctx.lineTo(2, 2.4); ctx.moveTo(2, -1.6); ctx.lineTo(-2, 2.4); ctx.stroke();
@@ -2711,13 +3181,14 @@ function drawItemIcon(type, x, y) {
 }
 
 // ===================== TITLE, CONTROLS, FIRST-TIME TIPS =====================
-let title = location.hash !== '#play', showDebug = false;
+let title = location.hash !== '#play', showDebug = false, showF3 = false;
+const book = { open: false, scroll: 0, max: 0 };
 function startGame() { title = false; initAudio(); }
 const CONTROLS = [
   ['SEATED (AT THE CHAIR)', [['W A S D', 'steer'], ['LMB', 'directional sonar ping'], ['RMB', 'all-around sonar ping'], ['E (hold)', 'robot arm grabs where you aim'],
                              ['Q', 'horn (fires its loaded charge)'], ['1  2  3', 'sonar / pump / lights'], ['SPACE', 'dive (at the dock)'], ['F', 'stand up']]],
-  ['STANDING', [['A / D', 'walk'], ['MOUSE', 'your hand'], ['LMB', 'grab / click'], ['E', 'use / repair'], ['F', 'sit (by the chair)'], ['ESC', 'close / stop']]],
-  ['ANYTIME', [['H', 'buy hull (dock)'], ['P', 'pay quota (dock)'], ['TAB', 'show controls'], ['ENTER', 'dismiss a tip'], ['M', 'sound on / off'], ['G', 'graphics high / low'], ['`', 'debug readout']]],
+  ['STANDING', [['A / D', 'walk'], ['MOUSE', 'your hand'], ['LMB', 'grab / click'], ['E', 'inspect a part / use'], ['F', 'sit (by the chair)'], ['ESC', 'close / stop']]],
+  ['ANYTIME', [['J', 'handbook (codes)'], ['H', 'buy hull (dock)'], ['P', 'pay quota (dock)'], ['TAB', 'show controls'], ['ENTER', 'dismiss a tip'], ['M', 'sound on / off'], ['G', 'graphics high / low'], ['` / F3', 'debug readouts']]],
 ];
 function drawControls(y) {
   const W = cv.width, cw = Math.min(300, (W - 64) / 3), x0 = (W - cw * 3) / 2;
@@ -2752,11 +3223,11 @@ const TIPS = {
   loot: 'YELLOW BLIP = LOOT. Hold E and point at it on the sonar: the arm grabs it. Relics float up on a balloon and pay out. Scrap gets dropped inside.',
   creature: 'SOMETHING BIG ON SONAR. Touching it wrecks the engine. The horn shoves it away (Q), but the HORN module starts in storage: install it in a slot first.',
   reload: 'HORN EMPTY. It holds one charge. Reload it by hand: take a CHARGE from storage, touch the horn module, hold E.',
-  damaged: "SOMETHING'S DAMAGED (check the terminal). Stand up, open the storage (orange, top right), take the matching part, touch the broken thing, press E. PIPE = pump, FILTER = air generator, METAL = the rest.",
+  damaged: 'A CODE ON THE TERMINAL means something failed. Look it up in the handbook (J). Stand up, take the right item from storage, touch the part and press E to open its panel.',
   floor: 'SCRAP ON THE FLOOR. Stand up, click it to pick it up, click the storage to stow it. Loose parts slide around when the sub tilts.',
   malfunction: 'MALFUNCTION: the engine room is flooded behind its door. Open it and that water pours into the cabin, so get the pump running first (2 at the terminal).',
   engine: "ENGINE'S OFF. Walk to the back, spin the yellow wheel (hold LMB, circle the mouse) to open the bay, touch the engine, press E.",
-  water: "WATER COMING IN. Pump it out (2 at the terminal, the pump only works in the floor slot). Over 40% shorts the terminal. Don't let the pump run dry: it blows up.",
+  water: "WATER COMING IN. Pump it out (2 at the terminal, the pump only works in the floor slot). Over 40% shorts the terminal. Don't let the pump run dry: it burns out.",
   power: "POWER'S OUT. The terminal dies in 7 s, the lights in 30 s, and without the air generator you have about a minute of air.",
   air: 'AIR FALLING. The air generator needs power and a slot. The crank on the wall (circle the mouse on it) slows the loss. A CHARGE is compressed air: hold one and hold E for +15% air (but that is a horn blast gone).',
   frozen: "PANEL FROZEN. Everything's stuck the way it was, throttle too. Cut the power at the breaker in the engine bay, then fix the panel with a METAL part.",
@@ -2776,7 +3247,7 @@ function checkTips() {
   if (phase !== 'dive') return;
   showTip('dive');
   if (mode === 'standing') showTip('stand');
-  if (Object.values(parts).some(p => p.worn || p.broken) || modules.some(m => m.worn || m.broken)) showTip('damaged');
+  if (activeCodes().length) showTip('damaged');
   if (items.some(i => i.where === 'floor')) showTip('floor');
   if (engine.state === 'off' && engine.report === 'malfunction') showTip('malfunction');
   if (engine.state === 'off' && engine.report !== 'fuel') showTip('engine');
@@ -2817,6 +3288,68 @@ function drawTip() {
   ctx.textAlign = 'right'; ctx.fillStyle = '#666'; ctx.font = '10px monospace'; ctx.fillText('ENTER: OK', x + w - 12, y + 16);
   ctx.textAlign = 'left'; ctx.font = '12px monospace'; ctx.fillStyle = '#dde';
   lines.forEach((l, i) => ctx.fillText(l, x + 14, y + 34 + i * 16));
+  ctx.restore();
+}
+// ----- The handbook (J): every code, its part, symptom and repair. Doesn't pause. Mouse wheel scrolls. -----
+function handbookLines() {
+  const L = [], H = (t, c = '#3a1e10') => L.push({ t, f: 'bold 14px monospace', c, gap: 10 }), T = (t, c = '#2a2418') => L.push({ t, f: '12px monospace', c, wrap: true });
+  L.push({ t: 'TECHNICAL HANDBOOK', f: 'bold 18px monospace', c: '#2a1a10' }); L.push({ t: 'J: close    mouse wheel: scroll', f: '11px monospace', c: '#6a5a40' });
+  H('READING FAULTS');
+  T('When something fails, the terminal prints only its code. Look the code up below.');
+  T('Touch a part and press E to open its panel. The lamp on top: GREEN = power reaches the part. DARK = it does not. FLICKERING = its wire is getting wet.');
+  T('The panel repair only works when the part is broken AND you hold the right item. The wrong item does nothing.');
+  T('IMPACT breaks (cracks) take METAL. INTERNAL failures take that part\'s own spare: metal will not fix them.');
+  T('Scars on a part are its repair history. A part that has broken more than twice takes 2 pieces per repair: click the same kind twice in the storage to hold two.');
+  T('Wires: each part has its own. Water touching a wire soaks it: first the power flickers, then it dies (C-71). Floor-level wires get wet first. The pump\'s wire is sealed.');
+  T('The emergency battery keeps lamps and repairs alive for 30 s after power drops. After that every lamp is dark and every repair is locked.');
+  T(`The storage carries ${MAX_ITEM_TYPES} kinds of item, any amount of each.`);
+  H('CODES');
+  for (const [code, d] of Object.entries(FAILS)) {
+    L.push({ t: `${code}   ${d.part === 'wiring' ? 'WIRING (any part)' : PART_LABEL[d.part]}`, f: 'bold 13px monospace', c: '#7a1e10', gap: 8 });
+    T(`Symptom: ${d.symptom}`); T(`Cause: ${d.cause}`);
+    T(`Repair: ${ITEM_TYPES[d.fix].name}${code === 'A-13' ? ', then pump the water out' : ''}`, '#1a3a20');
+  }
+  return L;
+}
+function drawHandbook() {
+  if (!book.open) return;
+  const W = cv.width, H = cv.height, w = Math.min(400, W * 0.38), x = W - w - 16, y = 70, h = H - y - 16, pad = 16;
+  ctx.save();
+  rect([x - 4, y - 4, w + 8, h + 8], '#3a2a18');                 // cover
+  rect([x, y, w, h], '#cfc6ad', '#8a7a5a');                       // paper
+  ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+  ctx.textAlign = 'left';
+  let ly = y + pad + 14 - book.scroll;
+  for (const l of handbookLines()) {
+    ly += l.gap || 0; ctx.font = l.f; ctx.fillStyle = l.c;
+    for (const t of l.wrap ? wrapText(l.t, w - 2 * pad) : [l.t]) { ctx.fillText(t, x + pad, ly); ly += parseInt(l.f.match(/\d+/)[0]) + 5; }
+  }
+  book.max = Math.max(0, ly + book.scroll - (y + h) + pad);
+  if (book.max > 0) { const th = h * h / (h + book.max); rect([x + w - 5, y + (h - th) * book.scroll / book.max, 3, th], 'rgba(60,40,20,0.5)'); }
+  ctx.restore();
+}
+// F3: every part's break count, failure, wear, and its wire's wetness
+function drawPartsDebug() {
+  if (!showF3) return;
+  const rows = PART_LIST.map(n => {
+    const p = P(n), w = p.wire;
+    return `${n.toUpperCase().padEnd(7)} breaks ${p.breakCount}  ${(p.fail || '-').padEnd(5)}${p.worn ? 'worn ' : '     '}wear ${p.wear.toFixed(2)}` +
+           (WIRED.includes(n) ? `  wire ${w.wet.toFixed(2)}${w.broken ? ' SOAKED' : w.off ? ' off   ' : '       '} wire breaks ${w.breakCount}` : '  (no wire)');
+  });
+  rows.push(`BATTERY ${batteryAlive() ? 'ok' : 'DEAD'}   scars: ${PART_LIST.map(n => n[0].toUpperCase() + P(n).scars.length).join(' ')}`);
+  const x = 16, y = 200;
+  ctx.save(); ctx.font = '11px monospace'; ctx.textAlign = 'left';
+  rect([x - 6, y - 14, 560, rows.length * 15 + 10], 'rgba(0,0,0,0.75)', '#355');
+  rows.forEach((r, i) => { ctx.fillStyle = '#9fd'; ctx.fillText(r, x, y + i * 15); });
+  // The open close-up: the exact state object it's drawing from
+  if (fix && fix.panel) {
+    const S = closeupState(fix.panel), fmt = v => typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(3)) : typeof v === 'object' && v ? JSON.stringify(v) : String(v);
+    const lines = [`CLOSE-UP ${fix.panel} READS:`, ...Object.entries(S).map(([k, v]) => `  ${k}: ${fmt(v)}`),
+                   `  repair job: ${fix.job ? `${fix.job.kind} ${fix.job.item} x${fix.job.cost} (${fix.job.game})` : 'none'}   hold: ${fix.ha ? fix.ha.label : 'none'}`];
+    const lx = cv.width - 330, ly = 200;
+    rect([lx - 6, ly - 14, 322, lines.length * 14 + 10], 'rgba(0,0,0,0.75)', '#355');
+    lines.forEach((t, i) => { ctx.fillStyle = i ? '#9fd' : '#ffb040'; ctx.fillText(t, lx, ly + i * 14); });
+  }
   ctx.restore();
 }
 const DEATH_HINTS = {
@@ -2878,22 +3411,29 @@ function drawOverlays(W, H) {
   drawFix();
   lowAirBlur(W, H);
 
-  bar(16, 14, 160, sub.hp / MAX_HP, sub.hp <= HIT_DAMAGE ? '#e44' : '#4c8', `HULL ${sub.hp}`);
-  bar(16, 30, 160, fuel, fuel < 0.2 ? '#e44' : '#db5', `FUEL ${Math.round(fuel * 100)}%`);
-  bar(16, 46, 160, air, air < 0.3 || !airMaking() ? '#e44' : '#9df', `AIR ${Math.round(air * 100)}%${airMaking() || phase === 'dock' ? '' : '  FALLING'}`);
-  bar(16, 62, 160, water, water > ASCEND_LOCK ? '#e44' : '#48f', `WATER ${Math.round(water * 100)}%`);
-  bar(16, 78, 160, Math.hypot(throttle.x, throttle.y), '#c8c', `THROTTLE (weight x${mass().toFixed(2)})`);
+  // Status bars and stock lines are dev-only (F3): in play, a part's status lives in its close-up (E on it)
+  if (showF3) {
+    bar(16, 14, 160, sub.hp / MAX_HP, sub.hp <= HIT_DAMAGE ? '#e44' : '#4c8', `HULL ${sub.hp}`);
+    bar(16, 30, 160, fuel, fuel < 0.2 ? '#e44' : '#db5', `FUEL ${Math.round(fuel * 100)}%`);
+    bar(16, 46, 160, air, air < 0.3 || !airMaking() ? '#e44' : '#9df', `AIR ${Math.round(air * 100)}%${airMaking() || phase === 'dock' ? '' : '  FALLING'}`);
+    bar(16, 62, 160, water, water > ASCEND_LOCK ? '#e44' : '#48f', `WATER ${Math.round(water * 100)}%`);
+    bar(16, 78, 160, Math.hypot(throttle.x, throttle.y), '#c8c', `THROTTLE (weight x${mass().toFixed(2)})`);
+  }
+  const hy = showF3 ? 110 : 20;
   ctx.font = '13px monospace'; ctx.textAlign = 'left';
-  ctx.fillStyle = RELIC_COLOR; ctx.fillText(`COINS ${coins}`, 16, 110);
+  ctx.fillStyle = RELIC_COLOR; ctx.fillText(`COINS ${coins}`, 16, hy);
   ctx.fillStyle = '#ddd';
   const left = DIVES_PER_QUOTA - (divesDone % DIVES_PER_QUOTA);
-  ctx.fillText(`QUOTA ${paid}/${quota}  due in ${left} dive${left > 1 ? 's' : ''}`, 16, 128);
-  ctx.fillText(`PARTS: METAL ${storedOf('METAL')}  PIPE ${storedOf('PIPE')}  FILTER ${storedOf('FILTER')}`, 16, 146);
-  ctx.fillText(`GAS ${storedOf('GAS')}  CHARGES ${charges()}  `, 16, 164);
-  const hl = mod('HORN').loaded > 0; ctx.fillStyle = hl ? '#fa4' : '#e44';
-  ctx.fillText(hl ? 'HORN LOADED' : 'HORN EMPTY', 16 + ctx.measureText(`GAS ${storedOf('GAS')}  CHARGES ${charges()}  `).width, 164);
-  ctx.fillStyle = arm.broken ? '#e44' : arm.hits ? '#fa3' : '#4c8';
-  ctx.fillText(arm.broken ? 'ARM BROKEN' : arm.hits ? 'ARM HIT' : 'ARM OK', 16, 182);
+  ctx.fillText(`QUOTA ${paid}/${quota}  due in ${left} dive${left > 1 ? 's' : ''}`, 16, hy + 18);
+  if (showF3) {
+    ctx.fillText(`METAL ${storedOf('METAL')}  COPPER ${storedOf('COPPER')}  PIPE ${storedOf('PIPE')}  FILTER ${storedOf('FILTER')}`, 16, 146);
+    const l2 = `TRANSD ${storedOf('TRANSDUCER')}  GAS ${storedOf('GAS')}  CHARGES ${charges()}  `;
+    ctx.fillText(l2, 16, 164);
+    const hl = mod('HORN').loaded > 0; ctx.fillStyle = hl ? '#fa4' : '#e44';
+    ctx.fillText(hl ? 'HORN LOADED' : 'HORN EMPTY', 16 + ctx.measureText(l2).width, 164);
+    ctx.fillStyle = arm.broken ? '#e44' : arm.hits ? '#fa3' : '#4c8';
+    ctx.fillText(arm.broken ? 'ARM BROKEN' : arm.hits ? 'ARM HIT' : 'ARM OK', 16, 182);
+  }
 
   ctx.textAlign = 'center'; ctx.font = 'bold 14px monospace';
   if (phase === 'dock') {
@@ -2904,7 +3444,7 @@ function drawOverlays(W, H) {
   ctx.fillText(mode === 'seated' ? 'SEATED' : 'STANDING', W / 2, 40);
   if (mode === 'standing') {
     const t = handTarget();
-    const hint = fix ? 'REPAIRING' : grip ? (grip.id === 'wheel' ? `CIRCLE THE MOUSE - BAY ${Math.round(hatch.progress * 100)}% OPEN` : 'CIRCLE THE MOUSE TO CRANK AIR')
+    const hint = fix ? (fix.panel ? (fix.game ? 'REPAIRING' : 'INSPECTING') : 'REPAIRING') : grip ? (grip.id === 'wheel' ? `CIRCLE THE MOUSE - BAY ${Math.round(hatch.progress * 100)}% OPEN` : 'CIRCLE THE MOUSE TO CRANK AIR')
       : t ? t.hint : canSit() ? 'F: SIT' : (fig.x >= SIT_RANGE[0] && fig.x <= SIT_RANGE[1] && seatUnderWater()) ? 'THE SEAT IS UNDER WATER - PUMP IT OUT' : 'A/D: WALK   MOUSE: HAND   E: USE   LMB: GRAB';
     ctx.font = '12px monospace'; ctx.fillStyle = '#ccc'; ctx.fillText(hint, W / 2, 58);
   }
@@ -2914,6 +3454,8 @@ function drawOverlays(W, H) {
   if (showDebug) dbg.forEach((t, i) => ctx.fillText(t, W - 12, 18 + i * 16));
   else { ctx.fillStyle = '#566'; ctx.fillText(`TAB: CONTROLS${muted ? '   SOUND OFF' : ''}`, W - 12, 18); }
   drawTip();
+  drawPartsDebug();
+  drawHandbook();
 
   if (sub.dead) {
     ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, H / 2 - 60, W, 110);
